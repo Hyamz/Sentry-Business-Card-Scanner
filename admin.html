@@ -64,6 +64,8 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
 .seg{display:grid;grid-template-columns:1fr 1fr;background:var(--surface-2);border-radius:12px;padding:4px;gap:4px}
 .seg button{border:0;background:transparent;border-radius:9px;padding:8px;font-weight:600;cursor:pointer;color:var(--muted)}
 .seg button[aria-pressed="true"]{background:var(--surface);color:var(--fg);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.f .check{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:500;letter-spacing:0;text-transform:none;color:var(--fg);cursor:pointer;margin-top:4px}
+.f .check input{width:18px;height:18px;accent-color:var(--teal)}
 .secret-row{display:grid;grid-template-columns:1fr auto;gap:8px}
 .mono{font-family:var(--f-mono)}
 .status{font-size:14px;padding:10px 12px;border-radius:10px;background:var(--surface-2)}
@@ -137,6 +139,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
           </div>
           <div class="f"><label for="a-role">Access</label>
             <select id="a-role"><option value="user">Scanner only</option><option value="admin">Admin (can manage users)</option></select>
+            <label class="check" for="a-del"><input type="checkbox" id="a-del"> Can delete from the shared list</label>
           </div>
           <div class="f" style="grid-column:1/-1"><label for="a-secret" id="a-secret-label">Password</label>
             <div class="secret-row"><input id="a-secret" class="mono" autocomplete="off" spellcheck="false"><button class="btn btn-quiet" id="a-gen" type="button">Generate</button></div>
@@ -150,7 +153,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       <div class="panel" id="created" hidden></div>
 
       <div class="list" id="users"><div class="empty">Loading users…</div></div>
-      <p class="hint">Contacts stay on each person's phone. Switching someone off or resetting their login signs them out everywhere straight away. The built-in <span class="mono">admin</span> login always works with the ADMIN_PASSWORD set in Cloudflare.</p>
+      <p class="hint">Everyone can see and add to the shared contact list and edit what they added. Admins, and anyone you allow, can delete from it. Switching someone off or resetting their login signs them out everywhere straight away. The built-in <span class="mono">admin</span> login always works with the ADMIN_PASSWORD set in Cloudflare.</p>
     </div>
   </div>
 </div>
@@ -251,6 +254,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     const main = el("div","u-main");
     const nm = el("div","u-name"); nm.append(el("span", null, u.name || u.username));
     if (u.role === "admin") nm.append(el("span","chip admin","Admin"));
+    else if (u.canDelete) nm.append(el("span","chip","Can delete"));
     nm.append(el("span","chip", u.type === "pin" ? "PIN" : "Password"));
     if (u.disabled) nm.append(el("span","chip off","Switched off"));
     if (u.lockedUntil && u.lockedUntil > now) nm.append(el("span","chip lock","Locked"));
@@ -316,6 +320,11 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       role.onclick = () => act({ role: u.role === "admin" ? "user" : "admin" }, u.role === "admin" ? "Admin access removed" : "Now an admin");
       const off = el("button","btn btn-quiet btn-sm", u.disabled ? "Switch on" : "Switch off"); off.type = "button";
       off.onclick = () => act({ disabled: !u.disabled }, u.disabled ? "Switched on" : "Switched off and signed out");
+      if (u.role !== "admin") {
+        const cd = el("button","btn btn-quiet btn-sm", u.canDelete ? "Remove delete rights" : "Allow deleting from shared list"); cd.type = "button";
+        cd.onclick = () => act({ canDelete: !u.canDelete }, u.canDelete ? "Delete rights removed" : "Can now delete from the shared list");
+        rowB.append(cd);
+      }
       const del = el("button","btn btn-danger btn-sm","Delete"); del.type = "button";
       del.onclick = () => {
         del.hidden = true;
@@ -348,7 +357,8 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
   $("#a-pw").onclick = () => setAddMode(false);
   $("#a-pin").onclick = () => setAddMode(true);
   $("#a-gen").onclick = () => { $("#a-secret").value = addPin ? genPin() : genPassword(); };
-  $("#addBtn").onclick = () => { $("#addPanel").hidden = false; $("#created").hidden = true; setAddMode(false); $("#a-err").hidden = true; $("#a-name").focus(); };
+  $("#addBtn").onclick = () => { $("#a-del").disabled = false; $("#addPanel").hidden = false; $("#created").hidden = true; setAddMode(false); $("#a-err").hidden = true; $("#a-name").focus(); };
+  $("#a-role").onchange = () => { const adm = $("#a-role").value === "admin"; $("#a-del").checked = adm || $("#a-del").checked; $("#a-del").disabled = adm; };
   $("#a-cancel").onclick = () => { $("#addPanel").hidden = true; };
   $("#a-name").addEventListener("input", () => {
     const u = $("#a-user");
@@ -362,7 +372,8 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     if (!body.username) { err.hidden = false; err.textContent = "Enter a username."; return; }
     $("#a-go").disabled = true;
     try {
-      const d = await api("/admin/create", body);
+      let d = await api("/admin/create", body);
+      if ($("#a-del").checked && body.role !== "admin") d = await api("/admin/update", { username: d.user.username, canDelete: true });
       users.push(d.user); render();
       $("#addPanel").hidden = true; $("#addPanel").reset(); delete $("#a-user").dataset.touched;
       showCreds(d.user, body.secret, "Created");

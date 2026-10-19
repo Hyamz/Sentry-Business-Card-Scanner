@@ -161,6 +161,10 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
 .seg{display:grid;grid-template-columns:1fr 1fr;background:var(--surface-2);border-radius:12px;padding:4px;gap:4px}
 .seg button{border:0;background:transparent;border-radius:9px;padding:9px;font-weight:600;cursor:pointer;color:var(--muted)}
 .seg button[aria-pressed="true"]{background:var(--surface);color:var(--fg);box-shadow:0 1px 3px rgba(0,0,0,.12)}
+.scope-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:-6px}
+.seg.scope{flex:0 1 300px}
+.row-by{display:block;font-family:var(--f-body);font-size:12px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.migrate{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;background:var(--lime-soft);color:var(--lime-ink);border-radius:12px;padding:12px 14px;font-size:14px}
 .pin-input{letter-spacing:.5em;text-align:center;font-family:var(--f-mono)}
 .share-hint{font-size:12px;color:var(--muted)}
 .confirm{margin-top:12px;padding:12px;border-radius:12px;background:var(--danger-soft);color:var(--danger);display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
@@ -206,6 +210,14 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
     <input id="q" type="search" placeholder="Search name, company, email, phone…" autocomplete="off" aria-label="Search contacts">
     <button class="clear" id="clearq" type="button" aria-label="Clear search" hidden>✕</button>
+  </div>
+
+  <div class="scope-row">
+    <div class="seg scope" role="group" aria-label="Show contacts">
+      <button type="button" id="sc-all" aria-pressed="true">Everyone</button>
+      <button type="button" id="sc-mine" aria-pressed="false">Added by me</button>
+    </div>
+    <button class="link-btn" id="refresh" type="button">Refresh</button>
   </div>
 
   <div id="results"></div>
@@ -280,15 +292,35 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       t.onabort = () => rej(t.error);
     });
   }
+  const canDel = () => !!(session && (session.user.role === "admin" || session.user.canDelete));
+  const canEdit = c => !!(session && (session.user.role === "admin" || c.createdBy === session.user.username));
   async function saveContact(c){
-    await tx("readwrite", st => st.put(c));
-    const i = contacts.findIndex(x => x.id === c.id);
-    if (i >= 0) contacts[i] = c; else contacts.push(c);
+    const d = await api("/contacts/save", { contact: c });
+    const saved = d.contact;
+    const i = contacts.findIndex(x => x.id === saved.id);
+    if (i >= 0) contacts[i] = saved; else contacts.unshift(saved);
     render();
+    return saved;
   }
   async function removeContact(id){
-    await tx("readwrite", st => st.delete(id));
+    await api("/contacts/delete", { id });
     contacts = contacts.filter(c => c.id !== id); render();
+  }
+  async function refreshList(quiet){
+    try {
+      const d = await api("/contacts/list");
+      contacts = d.contacts || []; mode = "shared";
+      $("#notice").hidden = true;
+      render();
+    } catch (e) {
+      if (e.code === "signed_out") return;
+      if (!quiet) {
+        mode = mode === "loading" ? "error" : mode;
+        note(e.code === "no_database" ? "The shared contact list isn't set up yet. Ask your IT manager to finish the database step."
+          : e instanceof TypeError ? "Couldn't reach the shared list. Check your signal and tap Refresh." : "Couldn't load the shared list. Tap Refresh to try again.");
+        render();
+      }
+    }
   }
   const newId = () => "c" + Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 
@@ -355,6 +387,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     session = null;
     try { localStorage.removeItem(SKEY); } catch {}
     contacts = []; idb = null; mode = "loading"; render(); closeSheet();
+    document.querySelectorAll(".migrate").forEach(x => x.remove());
     showLogin(expired ? "You've been signed out. Sign in again to carry on." : "");
   }
   $("#signOut").onclick = () => signOut(false);
@@ -364,16 +397,41 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     $("#who").textContent = "Signed in as " + (u.name || u.username);
     $("#adminLink").hidden = $("#adminDot").hidden = u.role !== "admin";
     mode = "loading"; render();
-    try {
-      idb = await openIdb(u.username);
-      contacts = await tx("readonly", st => st.getAll()) || [];
-      try { if (navigator.storage && navigator.storage.persist) navigator.storage.persist(); } catch {}
-    } catch {
-      note("This browser won't let the scanner save contacts. If you're in a private window, open it in a normal one.");
-      contacts = [];
-    }
-    mode = "local"; render();
+    await refreshList(false);
+    offerMigration(u.username);
   }
+
+  // Contacts saved on this phone by the earlier version can be moved to the shared list.
+  async function offerMigration(username){
+    let local = [];
+    try { idb = await openIdb(username); local = await tx("readonly", st => st.getAll()) || []; } catch { return; }
+    if (!local.length) return;
+    const box = el("div","migrate");
+    box.append(el("span",null, local.length + (local.length === 1 ? " contact is" : " contacts are") + " saved only on this phone."));
+    const go = el("button","btn btn-brand btn-sm","Move to shared list"); go.type = "button";
+    box.append(go);
+    $("#results").before(box);
+    go.onclick = async () => {
+      go.disabled = true; go.textContent = "Moving…";
+      try {
+        let added = 0;
+        for (let i = 0; i < local.length; i += 50) added += (await api("/contacts/import", { contacts: local.slice(i, i + 50) })).added || 0;
+        await tx("readwrite", st => st.clear());
+        box.remove(); await refreshList(false);
+        toast("Moved " + added + (added === 1 ? " contact" : " contacts") + " to the shared list");
+      } catch { go.disabled = false; go.textContent = "Move to shared list"; toast("Couldn't move them. Try again."); }
+    };
+  }
+
+  // Keep the shared list fresh while the page is open.
+  setInterval(() => { if (session && !document.hidden && $("#sheet").hidden && mode === "shared") refreshList(true); }, 60000);
+  document.addEventListener("visibilitychange", () => { if (session && !document.hidden && $("#sheet").hidden && mode === "shared") refreshList(true); });
+  $("#refresh").onclick = async () => { await refreshList(false); toast("List updated"); };
+
+  let scope = "all";
+  const setScope = v => { scope = v; $("#sc-all").setAttribute("aria-pressed", String(v === "all")); $("#sc-mine").setAttribute("aria-pressed", String(v === "mine")); render(); };
+  $("#sc-all").onclick = () => setScope("all");
+  $("#sc-mine").onclick = () => setScope("mine");
 
   async function boot(){
     render();
@@ -407,7 +465,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     return d.toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short",year:"numeric"});
   }
   const initials = c => ((c.name || c.company || "?").trim().split(/\s+/).slice(0,2).map(w => w[0]).join("") || "?").toUpperCase();
-  const haystack = c => [c.name,c.title,c.company,c.phone,c.mobile,c.email,c.website,c.address,c.notes,
+  const haystack = c => [c.createdByName,c.name,c.title,c.company,c.phone,c.mobile,c.email,c.website,c.address,c.notes,
     ...(c.socials||[]).map(s => s.network + " " + s.url)].filter(Boolean).join(" ").toLowerCase();
 
   function render(){
@@ -415,13 +473,15 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     res.replaceChildren();
     $("#count").textContent = contacts.length + (contacts.length === 1 ? " contact" : " contacts");
     if (mode === "loading") {
-      res.append(emptyBox("Loading your contacts…", "Cards you scan will appear here, newest first."));
+      res.append(emptyBox("Loading the shared list…", "Every card the team scans appears here, newest first."));
       return;
     }
     const list = visible();
     $("#export").hidden = !list.length;
     $("#exportLabel").textContent = query && list.length !== contacts.length ? "Export " + list.length + " to CSV" : "Export CSV";
-    if (!contacts.length) { res.append(emptyBox("No contacts yet", "Tap “Scan a card” to photograph your first business card.")); return; }
+    if (mode === "error") { res.append(emptyBox("Shared list unavailable", "Tap Refresh to try again.")); return; }
+    if (!contacts.length) { res.append(emptyBox("No contacts yet", "Tap “Scan a card” to add the first business card to the shared list.")); return; }
+    if (!list.length && scope === "mine" && !query) { res.append(emptyBox("You haven't added any yet", "Cards you scan will show here. Switch to Everyone to see the whole team's list.")); return; }
     if (!list.length) { res.append(emptyBox("No matches", "Nothing matches “" + query + "”. Try a name, company, email or number.")); return; }
 
     const groups = new Map();
@@ -456,6 +516,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     const t = el("div","row-time");
     if (Date.now() - (c.createdAt||0) < 6*36e5) { t.append(el("span","pill-new","New"), document.createElement("br")); }
     t.append(document.createTextNode(fmtTime(c.createdAt||0)));
+    if (c.createdByName) t.append(el("span","row-by", c.createdBy === (session && session.user.username) ? "You" : String(c.createdByName).split(" ")[0]));
     b.append(avatarFor(c), main, t);
     b.onclick = () => openDetail(c.id);
     return b;
@@ -612,15 +673,15 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       c.notes = nt.value.trim();
       c.socials = [...socBox.querySelectorAll(".soc")].map(r => ({ network: r.querySelector(".soc-net").value, url: r.querySelector(".soc-url").value.trim() })).filter(x => x.url);
       if (!c.name && !c.company && !c.email && !c.phone && !c.mobile) { setStatus("err","Add at least a name, company, email or phone number."); return; }
-      if (!c.createdAt) c.createdAt = Date.now();
-      c.updatedAt = Date.now();
+      if (!opts.isNew) delete c.photo;
       save.disabled = true;
       try {
         await saveContact(c);
-        closeSheet(); toast(opts.isNew ? "Contact saved" : "Changes saved");
+        closeSheet(); toast(opts.isNew ? "Added to the shared list" : "Changes saved");
       } catch (e) {
         save.disabled = false;
-        setStatus("err", e && e.code === "quota_exceeded" ? "Storage is full. Delete some contacts and try again." : "Couldn't save. Check your connection and try again.");
+        if (e && e.code === "signed_out") return;
+        setStatus("err", (e && e.data && e.data.message) || (e instanceof TypeError ? "Couldn't reach the shared list. Check your signal and try again." : "Couldn't save. Try again."));
       }
     };
     function setStatus(kind, text){
@@ -657,7 +718,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     info.append(el("h2","d-name", c.name || c.company || "Unnamed contact"));
     const role = [c.title, c.name ? c.company : ""].filter(Boolean).join(" · ");
     if (role) info.append(el("div","d-role", role));
-    info.append(el("div","added", "Added " + fmtFull(c.createdAt||0) + (c.updatedAt && c.updatedAt - c.createdAt > 60000 ? " · edited " + fmtFull(c.updatedAt) : "")));
+    info.append(el("div","added", "Added by " + (c.createdBy === session.user.username ? "you" : (c.createdByName || c.createdBy || "someone")) + " · " + fmtFull(c.createdAt||0) + (c.updatedAt && c.updatedAt - c.createdAt > 60000 ? " · edited " + fmtFull(c.updatedAt) : "")));
     hero.append(avatarFor(c), info); s.append(hero);
 
     const list = el("div","d-list");
@@ -682,22 +743,32 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     if (c.notes) item("Notes", c.notes);
     if (list.children.length) s.append(list);
 
-    if (c.photo) { const p = new Image(); p.className = "photo"; p.src = c.photo; p.alt = "Photo of the business card"; p.style.marginTop = "14px"; s.append(p); }
+    const photoSlot = el("div"); s.append(photoSlot);
+    const showPhoto = src => { const p = new Image(); p.className = "photo"; p.src = src; p.alt = "Photo of the business card"; p.style.marginTop = "14px"; photoSlot.replaceChildren(p); };
+    if (c.photo) showPhoto(c.photo);
+    else if (c.hasPhoto) api("/contacts/get", { id: c.id }).then(d => { if (d.contact && d.contact.photo) { c.photo = d.contact.photo; showPhoto(c.photo); } }).catch(() => {});
 
     const act = el("div","actions");
-    const edit = el("button","btn btn-brand grow","Edit"); edit.type="button"; edit.onclick = () => openEditor(c, { isNew:false });
-    act.append(edit);
+    if (canEdit(c)) {
+      const edit = el("button","btn btn-brand grow","Edit"); edit.type="button";
+      edit.onclick = async () => {
+        if (c.hasPhoto && !c.photo) { try { const d = await api("/contacts/get", { id: c.id }); c.photo = d.contact.photo; } catch {} }
+        openEditor(c, { isNew:false });
+      };
+      act.append(edit);
+    }
     const addp = el("a","btn btn-quiet","Add to phone contacts");
     addp.href = URL.createObjectURL(new Blob([vcard(c)], { type:"text/vcard;charset=utf-8" }));
     if (!isApple) addp.download = fileBase(c) + ".vcf";
     addp.onclick = () => toast(isApple ? "Scroll down and tap Create New Contact" : "Open the download and choose Contacts");
     act.append(addp);
-    const sh = el("button","btn btn-lime","Share"); sh.type="button";
-    act.insertBefore(sh, act.children[1] || null);
+    const sh = el("button","btn btn-lime" + (canEdit(c) ? "" : " grow"),"Share"); sh.type="button";
+    act.insertBefore(sh, canEdit(c) ? (act.children[1] || null) : act.firstChild);
     const del = el("button","btn btn-danger","Delete"); del.type="button";
-    act.append(del); s.append(act);
+    if (canDel()) act.append(del);
+    s.append(act);
     const conf = el("div","confirm"); conf.hidden = true;
-    conf.append(el("span",null,"Delete this contact for good?"));
+    conf.append(el("span",null,"Delete from the shared list for everyone?"));
     const yes = el("button","btn btn-danger","Delete"); yes.type="button"; yes.style.boxShadow="inset 0 0 0 1.5px currentColor";
     const no = el("button","btn btn-quiet","Keep"); no.type="button";
     const cb = el("div"); cb.style.display="flex"; cb.style.gap="8px"; cb.append(no,yes); conf.append(cb);
@@ -738,8 +809,8 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     no.onclick = () => { conf.hidden = true; };
     yes.onclick = async () => {
       yes.disabled = true;
-      try { await removeContact(c.id); closeSheet(); toast("Contact deleted"); }
-      catch { yes.disabled = false; toast("Couldn't delete. Try again."); }
+      try { await removeContact(c.id); closeSheet(); toast("Deleted from the shared list"); }
+      catch (e) { yes.disabled = false; if (!e || e.code !== "signed_out") toast((e && e.data && e.data.message) || "Couldn't delete. Try again."); }
     };
     openSheet();
   }
@@ -813,7 +884,9 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
 
   function visible(){
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
+    const me = session && session.user.username;
     return contacts
+      .filter(c => scope !== "mine" || c.createdBy === me)
       .filter(c => !terms.length || terms.every(t => haystack(c).includes(t)))
       .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
   }
@@ -876,7 +949,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       if (col("name") < 0 && col("company") < 0) throw 0;
       const unq = v => String(v || "").replace(/^'(?=[=@+\-])/, "").trim();
       const have = new Set(contacts.map(c => [c.name,c.email,c.phone,c.mobile].join("|").toLowerCase()));
-      let added = 0;
+      const batch = [];
       for (const r of rows.slice(1)) {
         const c = { id:newId(), socials:[] };
         for (const [k, h] of Object.entries(map)) c[k] = col(h) >= 0 ? unq(r[col(h)]) : "";
@@ -892,12 +965,14 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
         const key = [c.name,c.email,c.phone,c.mobile].join("|").toLowerCase();
         if (have.has(key)) continue;
         have.add(key);
-        await tx("readwrite", st => st.put(c)); contacts.push(c); added++;
+        batch.push(c);
       }
-      render();
+      let added = 0;
+      for (let i = 0; i < batch.length; i += 100) added += (await api("/contacts/import", { contacts: batch.slice(i, i + 100) })).added || 0;
+      await refreshList(true);
       toast(added ? "Imported " + added + (added === 1 ? " contact" : " contacts") : "No new contacts in that file");
     } catch {
-      toast("That file couldn't be imported. Use a CSV exported from the scanner.");
+      toast("That file couldn't be imported. Use a CSV exported from the scanner, and check your signal.");
     }
   };
 
