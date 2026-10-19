@@ -504,7 +504,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       try { localStorage.setItem(SKEY, JSON.stringify(session)); } catch {}
       const wasSolo = solo();
       applyUser(d.user);
-      if (wasSolo !== !!d.user.standalone) refreshList(true);
+      if (wasSolo !== !!d.user.standalone) refreshList(true); else render();
     } catch {}
   }
 
@@ -540,7 +540,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     if (!solo()) buildUserFilter();
     const list = visible();
     if (scope !== "all" && !solo()) res.append(userSummary());
-    $("#export").hidden = !list.length;
+    $("#export").hidden = !list.length || !(session && session.user.canExport);
     $("#exportLabel").textContent = list.length !== contacts.length ? "Export " + list.length + " to CSV" : "Export CSV";
     if (mode === "error") { res.append(emptyBox("Shared list unavailable", "Tap Refresh to try again.")); return; }
     if (!contacts.length) { res.append(emptyBox("No contacts yet", solo() ? "Tap “Scan a card” to add your first business card. Your list is private to you." : "Tap “Scan a card” to add the first business card to the shared list.")); return; }
@@ -1168,7 +1168,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     return "﻿" + [head, ...rows].map(r => r.map(csvCell).join(",")).join("\r\n");
   }
   $("#export").onclick = () => {
-    const list = visible(); if (!list.length) return;
+    const list = visible(); if (!list.length || !session || !session.user.canExport) return;
     const d = new Date(), pad = n => String(n).padStart(2,"0");
     const a = document.createElement("a");
     a.href = URL.createObjectURL(new Blob([toCSV(list)], { type:"text/csv;charset=utf-8" }));

@@ -144,6 +144,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
           <div class="f"><label for="a-role">Access</label>
             <select id="a-role"><option value="user">Scanner only</option><option value="admin">Admin (can manage users)</option></select>
             <label class="check" for="a-del"><input type="checkbox" id="a-del"> Can delete from the shared list</label>
+            <label class="check" for="a-exp"><input type="checkbox" id="a-exp"> Can export contacts to CSV</label>
             <label class="check" for="a-solo"><input type="checkbox" id="a-solo"> Standalone (keeps their contacts private)</label>
           </div>
           <div class="f" style="grid-column:1/-1"><label for="a-secret" id="a-secret-label">Password</label>
@@ -260,6 +261,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     const nm = el("div","u-name"); nm.append(el("span", null, u.name || u.username));
     if (u.role === "admin") nm.append(el("span","chip admin","Admin"));
     else if (u.canDelete) nm.append(el("span","chip","Can delete"));
+    if (u.role !== "admin" && u.canExport) nm.append(el("span","chip","Can export"));
     if (u.standalone) nm.append(el("span","chip solo","Standalone"));
     nm.append(el("span","chip", u.type === "pin" ? "PIN" : "Password"));
     if (u.disabled) nm.append(el("span","chip off","Switched off"));
@@ -331,6 +333,11 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       solo.onclick = () => act({ standalone: !u.standalone }, u.standalone ? "New contacts will go to the shared list" : "Now standalone. New contacts stay private");
       rowB.append(solo);
       if (u.role !== "admin") {
+        const ex = el("button","btn btn-quiet btn-sm", u.canExport ? "Remove CSV export" : "Allow CSV export"); ex.type = "button";
+        ex.onclick = () => act({ canExport: !u.canExport }, u.canExport ? "CSV export removed" : "Can now export to CSV");
+        rowB.append(ex);
+      }
+      if (u.role !== "admin") {
         const cd = el("button","btn btn-quiet btn-sm", u.canDelete ? "Remove delete rights" : "Allow deleting from shared list"); cd.type = "button";
         cd.onclick = () => act({ canDelete: !u.canDelete }, u.canDelete ? "Delete rights removed" : "Can now delete from the shared list");
         rowB.append(cd);
@@ -378,8 +385,8 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
   $("#a-pw").onclick = () => setAddMode(false);
   $("#a-pin").onclick = () => setAddMode(true);
   $("#a-gen").onclick = () => { $("#a-secret").value = addPin ? genPin() : genPassword(); };
-  $("#addBtn").onclick = () => { $("#a-del").disabled = false; $("#addPanel").hidden = false; $("#created").hidden = true; setAddMode(false); $("#a-err").hidden = true; $("#a-name").focus(); };
-  $("#a-role").onchange = () => { const adm = $("#a-role").value === "admin"; $("#a-del").checked = adm || $("#a-del").checked; $("#a-del").disabled = adm; };
+  $("#addBtn").onclick = () => { $("#a-del").disabled = false; $("#a-exp").disabled = false; $("#addPanel").hidden = false; $("#created").hidden = true; setAddMode(false); $("#a-err").hidden = true; $("#a-name").focus(); };
+  $("#a-role").onchange = () => { const adm = $("#a-role").value === "admin"; for (const id of ["#a-del", "#a-exp"]) { $(id).checked = adm || $(id).checked; $(id).disabled = adm; } };
   $("#a-cancel").onclick = () => { $("#addPanel").hidden = true; };
   $("#a-name").addEventListener("input", () => {
     const u = $("#a-user");
@@ -397,6 +404,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       const extra = {};
       if ($("#a-del").checked && body.role !== "admin") extra.canDelete = true;
       if ($("#a-solo").checked) extra.standalone = true;
+      if ($("#a-exp").checked && body.role !== "admin") extra.canExport = true;
       if (Object.keys(extra).length) d = await api("/admin/update", { username: d.user.username, ...extra });
       users.push(d.user); render();
       $("#addPanel").hidden = true; $("#addPanel").reset(); delete $("#a-user").dataset.touched;

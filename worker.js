@@ -77,6 +77,7 @@ const publicUser = u => ({
   createdAt: u.createdAt, lastLogin: u.lastLogin || null, scans: u.scans || 0,
   canDelete: u.role === "admin" || !!u.canDelete,
   standalone: !!u.standalone,
+  canExport: u.role === "admin" || !!u.canExport,
   lockedUntil: u.lockedUntil && u.lockedUntil > Date.now() ? u.lockedUntil : null,
 });
 
@@ -233,6 +234,7 @@ async function updateUser(env, me, body) {
   if (body.unlock) { user.fails = 0; user.lockedUntil = null; }
   if (typeof body.canDelete === "boolean") user.canDelete = body.canDelete;
   if (typeof body.standalone === "boolean") user.standalone = body.standalone;
+  if (typeof body.canExport === "boolean") user.canExport = body.canExport;
   await putUser(env, user);
   return reply(200, { user: publicUser(user) });
 }
