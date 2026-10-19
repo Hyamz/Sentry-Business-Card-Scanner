@@ -182,6 +182,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
 .ph-text{flex:1;min-width:0;font-size:14px;overflow-wrap:anywhere}
 .ph-text strong{display:block;font-size:15px}
 .ph-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.ver{flex-basis:100%;text-align:center;font-family:var(--f-mono);font-size:11px;opacity:.7}
 .update-bar{position:fixed;left:50%;bottom:calc(16px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:35;display:flex;align-items:center;gap:12px;background:var(--teal);color:var(--teal-fg);border-radius:14px;padding:10px 12px 10px 16px;box-shadow:var(--shadow);font-weight:600;max-width:calc(100% - 32px)}
 .update-bar button{border:0;border-radius:10px;padding:8px 12px;font-weight:700;background:var(--lime);color:#1b2a00;cursor:pointer}
 .pin-input{letter-spacing:.5em;text-align:center;font-family:var(--f-mono)}
@@ -253,6 +254,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     <span aria-hidden="true" id="adminDot" hidden>·</span>
     <span id="who"></span>
     <button class="link-btn" id="signOut" type="button">Sign out</button>
+    <span class="ver" id="ver"></span>
   </footer>
 </div>
 
@@ -286,7 +288,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     ["website","Website",true],["address","Address",true]
   ];
   // Cloudflare Worker that holds the Anthropic API key and reads the cards.
-  const APP_VERSION = "202610192253";
+  const APP_VERSION = "202610192256";
   const WORKER_URL = "https://sentrycardscanner.robert-fb9.workers.dev";
   const NETWORKS = ["LinkedIn","X / Twitter","Instagram","Facebook","YouTube","TikTok","WhatsApp","Other"];
 
@@ -1368,6 +1370,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       }
     } catch {}
   }
+  $("#ver").textContent = "Version " + APP_VERSION;
   checkForUpdate();
   setInterval(checkForUpdate, 5 * 60000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) checkForUpdate(); });
