@@ -101,6 +101,8 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
 .c-detail{padding:0 12px 12px 58px;font-size:14px;display:flex;flex-direction:column;gap:3px;overflow-wrap:anywhere}
 .c-detail b{color:var(--muted);font-weight:600}
 @media (max-width:560px){.c-detail{padding-left:12px}.c-date{display:none}}
+.master{display:flex;flex-direction:column;gap:6px;padding:12px;border-radius:12px;background:var(--danger-soft);color:var(--danger)}
+.master .hint{color:inherit;opacity:.9}
 .u-panel{grid-column:1/-1;display:flex;flex-direction:column;gap:12px;padding-top:6px}
 .u-panel .row{display:flex;flex-wrap:wrap;gap:8px}
 @media (max-width:560px){.user{grid-template-columns:42px 1fr}.u-actions{grid-column:1/-1}}
@@ -277,6 +279,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     if (u.role !== "admin" && u.canExport) nm.append(el("span","chip","Can export"));
     if (u.standalone) nm.append(el("span","chip solo","Standalone"));
     nm.append(el("span","chip", u.type === "pin" ? "PIN" : "Password"));
+    if (u.protected) nm.append(el("span","chip admin","Protected"));
     if (u.disabled) nm.append(el("span","chip off","Switched off"));
     if (u.lockedUntil && u.lockedUntil > now) nm.append(el("span","chip lock","Locked"));
     main.append(nm, el("div","u-meta", u.username + " · last signed in " + fmt(u.lastLogin) + " · " + (u.scans || 0) + " scan" + (u.scans === 1 ? "" : "s")
@@ -357,15 +360,33 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     const me = session.user.username === u.username;
     const status = el("div","status"); status.hidden = true;
     const say = (kind, msg) => { status.hidden = false; status.className = "status " + kind; status.textContent = msg; };
-    const act = async (body, ok) => {
-      try {
-        const d = await api("/admin/update", { username: u.username, ...body });
-        const missed = Object.keys(body).filter(k => typeof body[k] === "boolean" && k !== "unlock" && d.user[k] !== body[k]);
-        if (missed.length) return say("err", "The server didn't save that setting. Paste the latest worker.js into Cloudflare and click Deploy, then try again.");
-        Object.assign(u, d.user); toast(ok); render();
+    // Runs an admin action; protected accounts ask for the master password and retry.
+    const masterBox = el("div","master"); masterBox.hidden = true;
+    const run = async (callFn, onOk, extra) => {
+      try { onOk(await callFn(extra || {})); masterBox.hidden = true; }
+      catch (e) {
+        if (e.code === "signed_out") return;
+        if (e.code === "master_required" || e.code === "bad_master") return askMaster(callFn, onOk, e);
+        say("err", errText(e, "That didn't work. Try again."));
       }
-      catch (e) { if (e.code !== "signed_out") say("err", errText(e, "That didn't work. Try again.")); }
     };
+    function askMaster(callFn, onOk, e){
+      masterBox.hidden = false; masterBox.replaceChildren();
+      masterBox.append(el("strong", null, "Master password needed"), el("span","hint", e.message || "This account is protected."));
+      const row = el("div","secret-row");
+      const inp = el("input"); inp.type = "password"; inp.autocomplete = "off"; inp.setAttribute("aria-label","Master password"); inp.placeholder = "Master password";
+      Object.assign(inp.style, { background:"var(--bg)", border:"1.5px solid var(--line)", borderRadius:"10px", padding:"8px 12px", minWidth:"0" });
+      const go = el("button","btn btn-danger btn-sm","Confirm"); go.type = "button";
+      go.onclick = () => { if (inp.value) run(callFn, onOk, { masterPassword: inp.value }); };
+      inp.addEventListener("keydown", ev => { if (ev.key === "Enter") go.click(); });
+      row.append(inp, go); masterBox.append(row);
+      setTimeout(() => inp.focus(), 30);
+    }
+    const act = (body, ok) => run(extra => api("/admin/update", { username: u.username, ...body, ...extra }), d => {
+      const missed = Object.keys(body).filter(k => typeof body[k] === "boolean" && k !== "unlock" && d.user[k] !== body[k]);
+      if (missed.length) return say("err", "The server didn't save that setting. Give the server a couple of minutes to update, then try again.");
+      Object.assign(u, d.user); toast(ok); render();
+    });
 
     // name
     const nameRow = el("div","secret-row");
@@ -394,10 +415,8 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       const v = sec.value.trim();
       const bad = pin ? (!/^\d{4,8}$/.test(v) && "A PIN must be 4 to 8 digits.") : (v.length < 8 && "A password must be at least 8 characters.");
       if (bad) return say("err", bad);
-      try {
-        const d = await api("/admin/update", { username: u.username, type: pin ? "pin" : "password", secret: v });
-        Object.assign(u, d.user); openRow = null; render(); showCreds(u, v, "Login reset for");
-      } catch (e) { if (e.code !== "signed_out") say("err", errText(e, "That didn't work. Try again.")); }
+      run(extra => api("/admin/update", { username: u.username, type: pin ? "pin" : "password", secret: v, ...extra }),
+        d => { Object.assign(u, d.user); openRow = null; render(); showCreds(u, v, "Login reset for"); });
     };
     reset.append(seg, sr, setBtn); p.append(reset);
 
@@ -429,10 +448,8 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
         const yes = el("button","btn btn-danger btn-sm","Delete " + (u.name || u.username)); yes.type = "button";
         const no = el("button","btn btn-quiet btn-sm","Keep"); no.type = "button";
         no.onclick = () => { conf.remove(); del.hidden = false; };
-        yes.onclick = async () => {
-          try { await api("/admin/delete", { username: u.username }); users = users.filter(x => x.username !== u.username); openRow = null; render(); toast("User deleted"); }
-          catch (e) { if (e.code !== "signed_out") say("err", errText(e, "Couldn't delete. Try again.")); }
-        };
+        yes.onclick = () => run(extra => api("/admin/delete", { username: u.username, ...extra }),
+          () => { users = users.filter(x => x.username !== u.username); openRow = null; render(); toast("User deleted"); });
         conf.append(no, yes); rowB.append(conf);
       };
       rowB.append(role, off, del);
@@ -448,7 +465,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       sh.append(shb);
       p.append(sh);
     }
-    p.append(rowB, status);
+    p.append(rowB, masterBox, status);
     return p;
   }
 

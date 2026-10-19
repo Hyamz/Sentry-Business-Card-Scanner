@@ -77,6 +77,7 @@ const publicUser = u => ({
   createdAt: u.createdAt, lastLogin: u.lastLogin || null, scans: u.scans || 0,
   canDelete: u.role === "admin" || !!u.canDelete,
   standalone: !!u.standalone,
+  protected: isProtected(u),
   canExport: u.role === "admin" || !!u.canExport,
   lockedUntil: u.lockedUntil && u.lockedUntil > Date.now() ? u.lockedUntil : null,
 });
@@ -210,9 +211,34 @@ async function createUser(env, me, body) {
   return reply(200, { user: publicUser(user) });
 }
 
+/* ---------- protected accounts ---------- */
+// Robert Hyams's account (and any account flagged protected) can only be deleted,
+// switched off, demoted, renamed or have its login reset by someone else
+// after entering the master password (MASTER_PASSWORD secret in Cloudflare).
+const isProtected = u => !!u && (!!u.protected || norm(u.name) === "robert hyams" || /^(robert\.?hyams|rhyams)$/.test(u.username));
+async function checkMaster(env, body) {
+  if (!env.MASTER_PASSWORD) return reply(403, { error: "master_not_set", message: "This account is protected, but no master password is set up yet. Add MASTER_PASSWORD as a secret in Cloudflare." });
+  const st = (await env.USERS.get("master:lock", "json")) || {};
+  if (st.lockedUntil && st.lockedUntil > Date.now()) return reply(423, { error: "master_locked", message: "Too many wrong master passwords. Try again in 15 minutes." });
+  if (!body.masterPassword) return reply(403, { error: "master_required", message: "This account is protected. Enter the master password to continue." });
+  if (!(await sameText(String(body.masterPassword), env.MASTER_PASSWORD))) {
+    st.fails = (st.fails || 0) + 1;
+    if (st.fails >= MAX_FAILS) { st.lockedUntil = Date.now() + LOCK_MINUTES * 6e4; st.fails = 0; }
+    await env.USERS.put("master:lock", JSON.stringify(st));
+    return reply(403, { error: "bad_master", message: "That master password isn't right." });
+  }
+  if (st.fails || st.lockedUntil) await env.USERS.put("master:lock", JSON.stringify({}));
+  return null;
+}
+
 async function updateUser(env, me, body) {
   const user = await getUser(env, cleanUsername(body.username));
   if (!user) return reply(404, { error: "not_found", message: "That user no longer exists." });
+  if (isProtected(user) && user.username !== me.username) {
+    const risky = body.disabled === true || body.role === "user" || !!body.secret
+      || (typeof body.name === "string" && body.name.trim() !== (user.name || ""));
+    if (risky) { const bad = await checkMaster(env, body); if (bad) return bad; }
+  }
   if (typeof body.name === "string") user.name = body.name.trim().slice(0, 80);
   if (body.role === "admin" || body.role === "user") {
     if (user.username === me.username && body.role !== "admin") return reply(400, { error: "self", message: "You can't remove your own admin access." });
@@ -242,6 +268,8 @@ async function updateUser(env, me, body) {
 async function deleteUser(env, me, body) {
   const username = cleanUsername(body.username);
   if (username === me.username) return reply(400, { error: "self", message: "You can't delete your own account." });
+  const target = await getUser(env, username);
+  if (isProtected(target)) { const bad = await checkMaster(env, body); if (bad) return bad; }
   await env.USERS.delete("user:" + username);
   return reply(200, { ok: true });
 }
