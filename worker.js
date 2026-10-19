@@ -324,6 +324,16 @@ async function importContacts(env, me, body) {
 
 export default {
   async fetch(request, env) {
+    try { return await handle(request, env); }
+    catch (e) {
+      console.log("Server error", e && e.stack || e);
+      return reply(500, { error: "server_error", message: "Server error: " + ((e && e.message) || "unknown") });
+    }
+  },
+};
+
+async function handle(request, env) {
+  {
     const origin = request.headers.get("Origin") || "";
     const path = new URL(request.url).pathname.replace(/\/+$/, "");
 
@@ -360,5 +370,5 @@ export default {
       if (path === "/admin/delete") return deleteUser(env, me, body);
     }
     return reply(404, { error: "not_found" });
-  },
-};
+  }
+}

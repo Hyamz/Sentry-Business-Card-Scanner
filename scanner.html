@@ -306,6 +306,15 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     await api("/contacts/delete", { id });
     contacts = contacts.filter(c => c.id !== id); render();
   }
+  function serverMsg(e){
+    if (!e) return "";
+    if (e.data && e.data.message) return e.data.message;
+    return ({
+      not_found: "The scanner server is still on the old version. Paste the new worker.js into Cloudflare and click Deploy.",
+      no_database: "The shared database isn't connected. In Cloudflare, check the D1 binding is named DB.",
+      not_configured: "The scanner isn't fully set up in Cloudflare yet."
+    })[e.code] || "";
+  }
   async function refreshList(quiet){
     try {
       const d = await api("/contacts/list");
@@ -316,7 +325,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       if (e.code === "signed_out") return;
       if (!quiet) {
         mode = mode === "loading" ? "error" : mode;
-        note(e.code === "no_database" ? "The shared contact list isn't set up yet. Ask your IT manager to finish the database step."
+        note(serverMsg(e) ? serverMsg(e)
           : e instanceof TypeError ? "Couldn't reach the shared list. Check your signal and tap Refresh." : "Couldn't load the shared list. Tap Refresh to try again.");
         render();
       }
@@ -681,7 +690,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       } catch (e) {
         save.disabled = false;
         if (e && e.code === "signed_out") return;
-        setStatus("err", (e && e.data && e.data.message) || (e instanceof TypeError ? "Couldn't reach the shared list. Check your signal and try again." : "Couldn't save. Try again."));
+        setStatus("err", serverMsg(e) || (e instanceof TypeError ? "Couldn't reach the shared list. Check your signal and try again." : "Couldn't save (" + ((e && e.code) || "unknown") + "). Try again."));
       }
     };
     function setStatus(kind, text){
