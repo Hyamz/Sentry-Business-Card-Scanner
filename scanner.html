@@ -176,6 +176,12 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
 .who-sum b{font-family:var(--f-display);font-size:18px;color:var(--fg);margin-right:3px}
 .row-by{display:block;font-family:var(--f-body);font-size:12px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .migrate{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;background:var(--lime-soft);color:var(--lime-ink);border-radius:12px;padding:12px 14px;font-size:14px}
+.avatar.has-img{background:#fff}
+.ph-box{display:flex;gap:12px;align-items:center;background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:10px 12px;margin-top:10px}
+.ph-box img{width:64px;height:64px;border-radius:14px;object-fit:cover;background:#fff;flex:none}
+.ph-text{flex:1;min-width:0;font-size:14px;overflow-wrap:anywhere}
+.ph-text strong{display:block;font-size:15px}
+.ph-actions{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
 .pin-input{letter-spacing:.5em;text-align:center;font-family:var(--f-mono)}
 .share-hint{font-size:12px;color:var(--muted)}
 .confirm{margin-top:12px;padding:12px;border-radius:12px;background:var(--danger-soft);color:var(--danger);display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between}
@@ -567,7 +573,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
   }
   function avatarFor(c){
     const a = el("div","avatar");
-    if (c.photo && /^data:image\//.test(c.photo)) { const i = new Image(); i.src = c.photo; i.alt = ""; a.append(i); }
+    if (c.avatar && /^data:image\//.test(c.avatar)) { const i = new Image(); i.src = c.avatar; i.alt = ""; a.append(i); a.classList.add("has-img"); }
     else a.textContent = initials(c);
     return a;
   }
@@ -781,6 +787,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     if (!readable) {
       ui.status(got > 1 ? "ok" : "", p.kind === "url" ? "This QR code is a profile link. Add their other details by hand if you have them."
         : got ? "Read from the QR code. Check the details before saving." : "This QR code didn't hold contact details. Its text is in Notes.");
+      if (got) ui.findPhoto();
       return;
     }
     ui.status("", "This QR code is a web link. Reading the contact details from it…");
@@ -790,6 +797,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       ui.fill(r);
       const n = FIELDS.filter(([k]) => r[k]).length + r.socials.length;
       ui.status(n ? "ok" : "", n ? "Read " + n + " detail" + (n === 1 ? "" : "s") + " from the link. Check them before saving." : "The link didn't show any contact details. It's saved as the website.");
+      if (n) ui.findPhoto();
     } catch (e) {
       if (e && e.code === "signed_out") return;
       ui.status("", e && e.code === "not_found" ? "The link is saved as the website. (Reading details from links needs the latest worker.js in Cloudflare.)"
@@ -812,6 +820,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       ui.fill(r);
       const found = FIELDS.filter(([k]) => r[k]).length + r.socials.length;
       ui.status(found ? "ok" : "err", found ? "Read " + found + " detail" + (found===1?"":"s") + ". Check them before saving." : "Couldn't read any details. Try a sharper, well-lit photo or type them in.");
+      if (found) ui.findPhoto();
     } catch (e) {
       if (e && e.name === "AbortError") return;
       const code = e && e.code;
@@ -859,6 +868,30 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     return r;
   }
 
+  // Turn a found photo or logo into a small square picture (photos are cropped, logos are fitted).
+  function squareImage(src, crop){
+    return new Promise((res, rej) => {
+      const img = new Image();
+      img.onload = () => {
+        if (img.width < 24 || img.height < 24) return rej();
+        const S = 160, c = document.createElement("canvas"); c.width = c.height = S;
+        const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, S, S);
+        if (crop) {
+          const side = Math.min(img.width, img.height);
+          const sx = (img.width - side) / 2, sy = img.height > img.width ? Math.max(0, (img.height - side) * 0.25) : 0;
+          g.drawImage(img, sx, sy, side, side, 0, 0, S, S);
+        } else {
+          const k = Math.min((S * 0.8) / img.width, (S * 0.8) / img.height);
+          const w = img.width * k, h = img.height * k;
+          g.drawImage(img, (S - w) / 2, (S - h) / 2, w, h);
+        }
+        res(c.toDataURL("image/jpeg", 0.82));
+      };
+      img.onerror = rej;
+      img.src = src;
+    });
+  }
+
   function makeThumb(file){
     return new Promise((res, rej) => {
       const url = URL.createObjectURL(file);
@@ -883,6 +916,51 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     const st = el("div","status"); st.hidden = !opts.scanning;
     if (opts.scanning) { st.append(el("span","spin"), el("span",null,"Reading the card…")); }
     s.append(st);
+
+    // Contact picture: current one, or a suggestion found online.
+    let avatarVal = contact.avatar || "", avatarChanged = false;
+    const ph = el("div","ph-box"); ph.hidden = true; s.append(ph);
+    const phBtn = (label, cls, fn) => { const b = el("button","btn btn-sm " + cls, label); b.type = "button"; b.onclick = fn; return b; };
+    function showAvatar(note){
+      if (!avatarVal) { ph.hidden = true; return; }
+      ph.hidden = false; ph.replaceChildren();
+      const i = new Image(); i.src = avatarVal; i.alt = "Contact picture";
+      const t = el("div","ph-text"); t.append(el("strong",null,"Contact picture"), el("span",null, note || ""));
+      const a = el("div","ph-actions"); a.append(phBtn("Remove","btn-quiet", () => { avatarVal = ""; avatarChanged = true; ph.hidden = true; }));
+      t.append(a); ph.append(i, t);
+    }
+    if (avatarVal) showAvatar("");
+    let photoLookup = 0;
+    async function findPhoto(manual){
+      const name = inputs.name.value.trim(), email = inputs.email.value.trim(), website = inputs.website.value.trim();
+      if (!name && !email && !website) { if (manual) toast("Add a name and their email or website first"); return; }
+      if (avatarVal && !manual) return;
+      const run = ++photoLookup;
+      ph.hidden = false; ph.replaceChildren(el("span","spin"), el("span","ph-text","Looking for a picture of them…"));
+      let d;
+      try { d = await api("/findphoto", { name, email, website, title: inputs.title.value.trim(), company: inputs.company.value.trim() }); }
+      catch (e) { if (run === photoLookup) { if (manual) toast(e && e.code === "not_found" ? "Photo search needs the latest server update" : "Couldn't search for a picture just now"); showAvatar(""); } return; }
+      if (run !== photoLookup || !ph.isConnected) return;
+      if (d.photo) {
+        const pic = await squareImage(d.photo, true).catch(() => null);
+        if (!pic) { showAvatar(""); return; }
+        ph.replaceChildren();
+        const i = new Image(); i.src = pic; i.alt = "Suggested photo";
+        const t = el("div","ph-text");
+        t.append(el("strong",null, "Is this " + (name || "them") + "?"), el("span",null, d.source === "gravatar" ? "Found on Gravatar (linked to their email)." : "Found on " + d.site + "."));
+        const a = el("div","ph-actions");
+        a.append(phBtn("Use photo","btn-brand", () => { avatarVal = pic; avatarChanged = true; showAvatar(d.source === "gravatar" ? "From Gravatar." : "From " + d.site + "."); }),
+                 phBtn("Not them","btn-quiet", () => { showAvatar(""); }));
+        t.append(a); ph.append(i, t);
+      } else if (d.logo) {
+        const pic = await squareImage(d.logo, false).catch(() => null);
+        if (pic && !avatarVal) { avatarVal = pic; avatarChanged = true; }
+        showAvatar(pic ? "No photo of them found, so this uses the " + d.site + " logo." : "");
+      } else {
+        if (manual) toast("No picture found for them online");
+        showAvatar("");
+      }
+    }
 
     const form = el("form","fields"); form.noValidate = true;
     const inputs = {};
@@ -914,6 +992,9 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     (contact.socials||[]).forEach(x => addSoc(x.network, x.url));
     const addBtn = el("button","link-btn","+ Add social link"); addBtn.type="button"; addBtn.onclick = () => addSoc();
     sf.append(addBtn); form.append(sf);
+    const fp = el("div","f full");
+    const fpBtn = el("button","link-btn","Find a picture of them"); fpBtn.type = "button"; fpBtn.onclick = () => findPhoto(true);
+    fp.append(fpBtn); form.append(fp);
     const nf = el("div","f full"); const nl = el("label",null,"Notes"); nl.htmlFor = "f-notes";
     const nt = document.createElement("textarea"); nt.id = "f-notes"; nt.value = contact.notes || "";
     nf.append(nl, nt); form.append(nf);
@@ -932,6 +1013,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       c.socials = [...socBox.querySelectorAll(".soc")].map(r => ({ network: r.querySelector(".soc-net").value, url: r.querySelector(".soc-url").value.trim() })).filter(x => x.url);
       if (!c.name && !c.company && !c.email && !c.phone && !c.mobile) { setStatus("err","Add at least a name, company, email or phone number."); return; }
       if (!opts.isNew) delete c.photo;
+      if (avatarChanged || (opts.isNew && avatarVal)) c.avatar = avatarVal; else delete c.avatar;
       save.disabled = true;
       try {
         await saveContact(c);
@@ -948,6 +1030,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     }
     return {
       status: setStatus,
+      findPhoto: () => findPhoto(false),
       fill(r){
         for (const [k] of FIELDS) if (r[k] && !inputs[k].value) inputs[k].value = r[k];
         if (r.notes && !nt.value) nt.value = r.notes;

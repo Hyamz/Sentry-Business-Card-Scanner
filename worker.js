@@ -298,6 +298,147 @@ async function readLink(env, me, body) {
   return reply(200, { card });
 }
 
+/* ---------- contact photos ---------- */
+// Looks in three places, in order: the company's own website (team/about pages),
+// Gravatar (a photo the person linked to their email), then the company logo.
+// A person photo is only ever a suggestion: the scanner asks before using it.
+const FREE_MAIL = /^(gmail|googlemail|hotmail|outlook|live|msn|yahoo|ymail|icloud|me|mac|aol|gmx|mail|protonmail|proton|btinternet|sky|virginmedia|talktalk|comcast|verizon|att|qq|163|yandex)\./i;
+const TEAM_WORDS = /team|people|leadership|management|about|staff|directors|board|who-we-are|meet|executive|contact/i;
+
+function domainsFor(body) {
+  const out = [];
+  const add = h => { h = String(h || "").toLowerCase().replace(/^www\./, "").trim(); if (h && /^[a-z0-9.-]+\.[a-z]{2,}$/.test(h) && !FREE_MAIL.test(h) && !out.includes(h)) out.push(h); };
+  try { if (body.website) add(new URL(/^https?:/i.test(body.website) ? body.website : "https://" + body.website).hostname); } catch {}
+  const em = String(body.email || "").split("@")[1]; if (em) add(em);
+  return out.slice(0, 2);
+}
+async function fetchImage(url) {
+  const res = await fetch(url, { redirect: "follow", signal: AbortSignal.timeout(8000), headers: { "User-Agent": "Mozilla/5.0 (SentryCardScanner)", "Accept": "image/*" } });
+  if (!res.ok) return null;
+  const type = (res.headers.get("content-type") || "").split(";")[0].trim();
+  if (!/^image\/(jpeg|png|webp|gif|x-icon|vnd\.microsoft\.icon)$/.test(type)) return null;
+  const buf = new Uint8Array(await res.arrayBuffer());
+  if (buf.length < 400 || buf.length > 3 * 1024 * 1024) return null;
+  let bin = ""; for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+  return "data:" + type + ";base64," + btoa(bin);
+}
+const strip = h => h.replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&#0?39;|&apos;|&rsquo;/g, "'").replace(/\s+/g, " ").trim();
+const norm = s => String(s || "").toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g, "").replace(/[^a-z0-9]+/g, " ").trim();
+
+function imageCandidates(html, pageUrl) {
+  const out = [];
+  const re = /<img\b[^>]*>/gi; let m;
+  while ((m = re.exec(html))) {
+    const tag = m[0];
+    const attr = n => { const x = tag.match(new RegExp("\\s" + n + "\\s*=\\s*[\"']([^\"']*)[\"']", "i")); return x ? x[1] : ""; };
+    let src = attr("data-src") || attr("data-lazy-src") || attr("src");
+    const set = attr("srcset") || attr("data-srcset");
+    if ((!src || /^data:/.test(src)) && set) src = set.split(",").pop().trim().split(/\s+/)[0];
+    if (!src || /^data:/.test(src) || /\.svg(\?|$)/i.test(src)) continue;
+    let abs; try { abs = new URL(src.replace(/&amp;/g, "&"), pageUrl).href; } catch { continue; }
+    const file = decodeURIComponent(abs.split("?")[0].split("/").pop() || "");
+    if (/logo|icon|sprite|banner|placeholder|blank|spacer|flag/i.test(file)) continue;
+    const before = strip(html.slice(Math.max(0, m.index - 600), m.index)).slice(-160);
+    const afterHtml = html.slice(m.index + tag.length, m.index + tag.length + 900);
+    const after = strip(afterHtml).slice(0, 200);
+    // The first heading after the image (before any other image) is usually the person's name.
+    const upToNextImg = afterHtml.split(/<img\b/i)[0];
+    const h = upToNextImg.match(/<(h[1-6]|strong|b)\b[^>]*>([\s\S]*?)<\/\1>/i);
+    const label = h ? strip(h[2]) : strip(upToNextImg).slice(0, 40);
+    out.push({ src: abs, alt: attr("alt") || attr("title"), file, before, after, label });
+  }
+  return out;
+}
+function scoreCandidate(c, first, last) {
+  const f = norm(c.file), a = norm(c.alt), after = norm(c.after), before = norm(c.before);
+  const full = (first + " " + last).trim();
+  let s = 0;
+  if (last && f.includes(last)) s += 3; if (first && f.includes(first)) s += 2;
+  if (last && a.includes(last)) s += 3; if (first && a.includes(first)) s += 2;
+  const label = norm(c.label);
+  if (full && label.includes(full)) s += 6;
+  else if (label && (first || last) && !label.includes(last) && /^[a-z]+ [a-z]+/.test(label) && label.split(" ").length <= 4) s -= 3; // labelled with someone else's name
+  else if (full && after.includes(full)) s += 1;
+  return s;
+}
+
+async function findPhoto(env, body) {
+  const name = norm(body.name);
+  const parts = name.split(" ").filter(p => p.length > 1);
+  const first = parts[0] || "", last = parts.length > 1 ? parts[parts.length - 1] : "";
+  const domains = domainsFor(body);
+  let logoPage = null;
+
+  // 1. The company's own website
+  if (first && last) {
+    for (const d of domains) {
+      let home;
+      try { home = await fetchText("https://" + d + "/", 500000); } catch { try { home = await fetchText("https://www." + d + "/", 500000); } catch { continue; } }
+      logoPage = logoPage || home;
+      const base = home.url;
+      const links = new Set();
+      for (const m of home.text.matchAll(/<a\b[^>]*href=["']([^"'#]+)["'][^>]*>([\s\S]*?)<\/a>/gi)) {
+        try {
+          const u = new URL(m[1].replace(/&amp;/g, "&"), base);
+          if (u.hostname.replace(/^www\./, "") !== new URL(base).hostname.replace(/^www\./, "")) continue;
+          if (TEAM_WORDS.test(u.pathname) || TEAM_WORDS.test(strip(m[2]))) links.add(u.href.split("#")[0]);
+        } catch {}
+      }
+      for (const p of ["/our-team/", "/team/", "/about/our-team/", "/about-us/", "/about/", "/leadership/", "/people/"]) links.add(new URL(p, base).href);
+      const pages = [home, ...(await Promise.all([...links].slice(0, 7).map(u => fetchText(u, 600000).catch(() => null))))].filter(Boolean);
+      let best = null, pool = [];
+      for (const pg of pages) {
+        for (const c of imageCandidates(pg.text, pg.url)) {
+          c.score = scoreCandidate(c, first, last); c.page = pg.url;
+          if (c.score > 0) pool.push(c);
+          if (!best || c.score > best.score) best = c;
+        }
+      }
+      // Clear match by name; otherwise let Claude pick among the partial matches.
+      let pick = best && best.score >= 5 ? best : null;
+      if (!pick && pool.length && env.ANTHROPIC_API_KEY) {
+        pool = pool.sort((a, b) => b.score - a.score).slice(0, 25);
+        const list = pool.map((c, i) => i + ". file=" + c.file + " | alt=" + c.alt + " | text before=" + c.before.slice(-80) + " | text after=" + c.after.slice(0, 120)).join("\n");
+        try {
+          const r = await fetch("https://api.anthropic.com/v1/messages", {
+            method: "POST",
+            headers: { "x-api-key": env.ANTHROPIC_API_KEY, "anthropic-version": "2023-06-01", "content-type": "application/json" },
+            body: JSON.stringify({ model: env.MODEL || DEFAULT_MODEL, max_tokens: 50, messages: [{ role: "user", content:
+              "These images come from a company website (" + d + "). Which one, if any, is a portrait photo of " + body.name + (body.title ? " (" + body.title + ")" : "") + "? "
+              + "Only choose one if the file name, alt text or the name next to it clearly points to this exact person. Reply with only the number, or -1 if none.\n\n" + list }] }),
+          });
+          if (r.ok) { const j = await r.json(); const n = parseInt(((j.content || [])[0] || {}).text, 10); if (n >= 0 && n < pool.length) pick = pool[n]; }
+        } catch {}
+      }
+      if (pick) {
+        const img = await fetchImage(pick.src).catch(() => null);
+        if (img) return reply(200, { photo: img, source: "website", site: d, page: pick.page });
+      }
+    }
+  }
+
+  // 2. Gravatar
+  const email = String(body.email || "").trim().toLowerCase();
+  if (/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(email)) {
+    const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(email)))].map(b => b.toString(16).padStart(2, "0")).join("");
+    const img = await fetchImage("https://gravatar.com/avatar/" + hash + "?s=400&d=404").catch(() => null);
+    if (img) return reply(200, { photo: img, source: "gravatar" });
+  }
+
+  // 3. Company logo
+  for (const d of domains) {
+    try {
+      const home = logoPage && new URL(logoPage.url).hostname.replace(/^www\./, "") === d ? logoPage : await fetchText("https://" + d + "/", 300000).catch(() => null);
+      const icon = home && (home.text.match(/<link[^>]+rel=["'][^"']*apple-touch-icon[^"']*["'][^>]*href=["']([^"']+)["']/i) || home.text.match(/<link[^>]+href=["']([^"']+)["'][^>]*rel=["'][^"']*apple-touch-icon/i));
+      const tries = [];
+      if (icon) tries.push(new URL(icon[1].replace(/&amp;/g, "&"), home.url).href);
+      tries.push("https://www.google.com/s2/favicons?domain=" + d + "&sz=128");
+      for (const t of tries) { const img = await fetchImage(t).catch(() => null); if (img) return reply(200, { logo: img, source: "logo", site: d }); }
+    } catch {}
+  }
+  return reply(200, { none: true });
+}
+
 /* ---------- shared contact list (D1) ---------- */
 let tableReady = false;
 async function ensureTable(env) {
@@ -308,6 +449,7 @@ async function ensureTable(env) {
     updated_at INTEGER NOT NULL, updated_by TEXT, shared INTEGER NOT NULL DEFAULT 1)`).run();
   const { results } = await env.DB.prepare("PRAGMA table_info(contacts)").all();
   if (!results.some(c => c.name === "shared")) await env.DB.prepare("ALTER TABLE contacts ADD COLUMN shared INTEGER NOT NULL DEFAULT 1").run();
+  if (!results.some(c => c.name === "avatar")) await env.DB.prepare("ALTER TABLE contacts ADD COLUMN avatar TEXT").run();
   tableReady = true;
 }
 const FIELDS = ["name", "title", "company", "phone", "mobile", "email", "website", "address", "notes"];
@@ -323,14 +465,15 @@ function cleanContact(c) {
 }
 const hasContent = c => !!(c.name || c.company || c.email || c.phone || c.mobile);
 const validId = id => /^[A-Za-z0-9_-]{4,64}$/.test(String(id || ""));
+const validAvatar = p => typeof p === "string" && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(p) && p.length < 80000;
 const validPhoto = p => typeof p === "string" && /^data:image\/(jpeg|png|webp);base64,[A-Za-z0-9+/=]+$/.test(p) && p.length < 400000;
 const rowOut = r => ({
   id: r.id, ...JSON.parse(r.data), createdAt: r.created_at, createdBy: r.created_by,
   createdByName: r.created_by_name || r.created_by, updatedAt: r.updated_at, updatedBy: r.updated_by,
-  hasPhoto: !!r.has_photo, shared: r.shared !== 0, ...(r.photo !== undefined ? { photo: r.photo || "" } : {}),
+  hasPhoto: !!r.has_photo, shared: r.shared !== 0, avatar: r.avatar || "", ...(r.photo !== undefined ? { photo: r.photo || "" } : {}),
 });
 
-const COLS = "id, data, created_at, created_by, created_by_name, updated_at, updated_by, shared, (photo IS NOT NULL AND photo != '') AS has_photo";
+const COLS = "id, data, created_at, created_by, created_by_name, updated_at, updated_by, shared, avatar, (photo IS NOT NULL AND photo != '') AS has_photo";
 // Standalone users see only their own contacts. Everyone else sees the shared list plus any private ones of their own.
 async function listContacts(env, me) {
   const { results } = me.standalone
@@ -358,10 +501,11 @@ async function saveContact(env, me, body) {
     } else {
       await env.DB.prepare("UPDATE contacts SET data = ?, updated_at = ?, updated_by = ? WHERE id = ?").bind(JSON.stringify(data), now, me.username, c.id).run();
     }
+    if (c.avatar === "" || validAvatar(c.avatar)) await env.DB.prepare("UPDATE contacts SET avatar = ? WHERE id = ?").bind(c.avatar || null, c.id).run();
   } else {
     const created = Number.isFinite(c.createdAt) && c.createdAt > 0 && c.createdAt <= now ? c.createdAt : now;
-    await env.DB.prepare("INSERT INTO contacts (id, data, photo, created_at, created_by, created_by_name, updated_at, updated_by, shared) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(c.id, JSON.stringify(data), validPhoto(c.photo) ? c.photo : null, created, me.username, me.name || me.username, now, me.username, me.standalone ? 0 : 1).run();
+    await env.DB.prepare("INSERT INTO contacts (id, data, photo, created_at, created_by, created_by_name, updated_at, updated_by, shared, avatar) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(c.id, JSON.stringify(data), validPhoto(c.photo) ? c.photo : null, created, me.username, me.name || me.username, now, me.username, me.standalone ? 0 : 1, validAvatar(c.avatar) ? c.avatar : null).run();
   }
   return getContact(env, me, { id: c.id });
 }
@@ -425,6 +569,7 @@ async function handle(request, env) {
     if (path === "/me") return reply(200, { user: publicUser(me) });
     if (path === "/scan") return scan(env, me, body);
     if (path === "/readlink") return readLink(env, me, body);
+    if (path === "/findphoto") return findPhoto(env, body);
     if (path.startsWith("/contacts/")) {
       if (!env.DB) return reply(500, { error: "no_database" });
       await ensureTable(env);
