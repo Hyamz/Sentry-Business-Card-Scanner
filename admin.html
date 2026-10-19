@@ -89,6 +89,18 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
 .chip.solo{background:var(--lime-soft);color:var(--lime-ink)}
 .chip.lock{background:var(--warn-soft);color:var(--warn)}
 .u-actions{display:flex;gap:6px}
+.c-list{display:flex;flex-direction:column;border:1px solid var(--line);border-radius:12px;overflow:hidden;max-height:60vh;overflow-y:auto}
+.c-row+.c-row{border-top:1px solid var(--line)}
+.c-row summary{display:grid;grid-template-columns:36px 1fr auto;gap:10px;align-items:center;padding:10px 12px;cursor:pointer;list-style:none}
+.c-row summary::-webkit-details-marker{display:none}
+.c-av{width:36px;height:36px;border-radius:10px;font-size:13px;overflow:hidden}
+.c-av img{width:100%;height:100%;object-fit:cover;background:#fff}
+.c-main{min-width:0}
+.c-name{font-weight:600;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.c-date{font-size:12px;color:var(--muted);text-align:right;font-variant-numeric:tabular-nums}
+.c-detail{padding:0 12px 12px 58px;font-size:14px;display:flex;flex-direction:column;gap:3px;overflow-wrap:anywhere}
+.c-detail b{color:var(--muted);font-weight:600}
+@media (max-width:560px){.c-detail{padding-left:12px}.c-date{display:none}}
 .u-panel{grid-column:1/-1;display:flex;flex-direction:column;gap:12px;padding-top:6px}
 .u-panel .row{display:flex;flex-wrap:wrap;gap:8px}
 @media (max-width:560px){.user{grid-template-columns:42px 1fr}.u-actions{grid-column:1/-1}}
@@ -171,7 +183,8 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
   const SKEY = "sentry-scanner-session";
   const $ = s => document.querySelector(s);
   const el = (t, c, x) => { const e = document.createElement(t); if (c) e.className = c; if (x != null) e.textContent = x; return e; };
-  let session = null, users = [], openRow = null;
+  let session = null, users = [], openRow = null, openContacts = null;
+  const contactCache = new Map();
   try { session = JSON.parse(localStorage.getItem(SKEY) || "null"); } catch {}
 
   async function api(path, body){
@@ -270,11 +283,73 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       + (u.contacts != null ? " · " + u.contacts + " contact" + (u.contacts === 1 ? "" : "s") + (u.privateContacts ? " (" + u.privateContacts + " private)" : "") : "")));
     const acts = el("div","u-actions");
     const manage = el("button","btn btn-quiet btn-sm","Manage"); manage.type = "button";
-    manage.onclick = () => { openRow = openRow === u.username ? null : u.username; render(); };
-    acts.append(manage);
+    manage.onclick = () => { openRow = openRow === u.username ? null : u.username; openContacts = null; render(); };
+    const cbtn = el("button","btn btn-quiet btn-sm","Contacts" + (u.contacts ? " (" + u.contacts + ")" : "")); cbtn.type = "button";
+    cbtn.onclick = () => { openContacts = openContacts === u.username ? null : u.username; openRow = null; render(); };
+    acts.append(cbtn, manage);
     r.append(av, main, acts);
     if (openRow === u.username) r.append(panel(u, now));
+    if (openContacts === u.username) r.append(contactsPanel(u));
     return r;
+  }
+
+  /* ---------- a user's contacts (includes private / standalone ones) ---------- */
+  function contactsPanel(u){
+    const p = el("div","u-panel");
+    const head = el("div","toolbar");
+    const q = el("input"); q.type = "search"; q.placeholder = "Search " + (u.name || u.username) + "'s contacts"; q.setAttribute("aria-label","Search this user's contacts");
+    Object.assign(q.style, { flex:"1 1 200px", minWidth:"0", background:"var(--bg)", border:"1.5px solid var(--line)", borderRadius:"10px", padding:"8px 12px" });
+    const exp = el("button","btn btn-quiet btn-sm","Export CSV"); exp.type = "button"; exp.hidden = true;
+    head.append(q, exp);
+    const box = el("div","c-list"); box.append(el("div","empty","Loading contacts…"));
+    p.append(head, box);
+    const draw = list => {
+      const t = q.value.trim().toLowerCase();
+      const shown = list.filter(c => !t || [c.name,c.title,c.company,c.email,c.phone,c.mobile,c.notes].join(" ").toLowerCase().includes(t));
+      box.replaceChildren();
+      if (!list.length) { box.append(el("div","empty", (u.name || u.username) + " hasn't added any contacts yet.")); return; }
+      if (!shown.length) { box.append(el("div","empty","No contacts match “" + q.value.trim() + "”.")); return; }
+      for (const c of shown) {
+        const row = el("details","c-row");
+        const sum = el("summary");
+        const av = el("div","avatar c-av");
+        if (c.avatar) { const i = new Image(); i.src = c.avatar; i.alt = ""; av.append(i); } else av.textContent = ((c.name || c.company || "?").trim().split(/\s+/).slice(0,2).map(w => w[0]).join("") || "?").toUpperCase();
+        const m = el("div","c-main");
+        const nm = el("div","c-name"); nm.append(el("span", null, c.name || c.company || "Unnamed contact"));
+        if (c.shared === false) nm.append(el("span","chip lock","Private"));
+        m.append(nm, el("div","u-meta", [c.title, c.company].filter(Boolean).join(" · ") || c.email || c.phone || ""));
+        sum.append(av, m, el("div","c-date", fmt(c.createdAt)));
+        const dl = el("div","c-detail");
+        for (const [k, v] of [["Phone", c.phone], ["Mobile", c.mobile], ["Email", c.email], ["Website", c.website], ["Address", c.address], ["Notes", c.notes]]) if (v) { const d = el("div"); d.append(el("b", null, k + " "), document.createTextNode(v)); dl.append(d); }
+        for (const so of (c.socials || [])) { const d = el("div"); d.append(el("b", null, so.network + " "), document.createTextNode(so.url)); dl.append(d); }
+        if (!dl.children.length) dl.append(el("div", null, "No other details."));
+        row.append(sum, dl); box.append(row);
+      }
+    };
+    q.addEventListener("input", () => { const l = contactCache.get(u.username); if (l) draw(l); });
+    exp.onclick = () => {
+      const list = contactCache.get(u.username) || [];
+      const cell = v => { let s = String(v == null ? "" : v); if (/^[=@]/.test(s) || (/^[+\-]/.test(s) && /[A-Za-z=]/.test(s))) s = "'" + s; return /[",\r\n]/.test(s) ? '"' + s.replace(/"/g,'""') + '"' : s; };
+      const rows = [["Name","Job title","Company","Phone","Mobile","Email","Website","Address","Social links","Notes","Private","Date added"]].concat(list.map(c =>
+        [c.name,c.title,c.company,c.phone,c.mobile,c.email,c.website,(c.address||"").replace(/\s*\n\s*/g,", "),(c.socials||[]).map(s => s.network + ": " + s.url).join(" | "),c.notes,c.shared === false ? "Yes" : "No",new Date(c.createdAt).toISOString().slice(0,16).replace("T"," ")]));
+      const a = document.createElement("a");
+      a.href = URL.createObjectURL(new Blob(["\ufeff" + rows.map(r => r.map(cell).join(",")).join("\r\n")], { type:"text/csv;charset=utf-8" }));
+      a.download = "contacts-" + u.username + ".csv"; document.body.append(a); a.click(); a.remove();
+    };
+    const load = async () => {
+      try {
+        const d = await api("/admin/contacts", { username: u.username });
+        contactCache.set(u.username, d.contacts || []);
+        exp.hidden = !(d.contacts || []).length;
+        if (box.isConnected) draw(d.contacts || []);
+      } catch (e) {
+        if (e.code === "signed_out") return;
+        box.replaceChildren(el("div","empty", e.code === "not_found" ? "This needs the latest server update. It installs itself within a couple of minutes, so try again shortly." : errText(e, "Couldn't load their contacts.")));
+      }
+    };
+    if (contactCache.has(u.username)) { const l = contactCache.get(u.username); exp.hidden = !l.length; draw(l); }
+    load();
+    return p;
   }
 
   function panel(u, now){

@@ -586,6 +586,13 @@ async function handle(request, env) {
       if (path === "/admin/create") return createUser(env, me, body);
       if (path === "/admin/update") return updateUser(env, me, body);
       if (path === "/admin/delete") return deleteUser(env, me, body);
+      if (path === "/admin/contacts") {
+        if (!env.DB) return reply(500, { error: "no_database" });
+        await ensureTable(env);
+        const u = cleanUsername(body.username);
+        const { results } = await env.DB.prepare("SELECT " + COLS + " FROM contacts WHERE created_by = ? ORDER BY created_at DESC").bind(u).all();
+        return reply(200, { contacts: results.map(rowOut) });
+      }
       if (path === "/admin/share") {
         if (!env.DB) return reply(500, { error: "no_database" });
         await ensureTable(env);
