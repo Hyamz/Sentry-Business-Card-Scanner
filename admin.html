@@ -86,6 +86,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
 .chip{font-size:11px;font-weight:600;border-radius:999px;padding:1px 8px;background:var(--surface-2);color:var(--muted);white-space:nowrap}
 .chip.admin{background:var(--teal);color:var(--teal-fg)}
 .chip.off{background:var(--danger-soft);color:var(--danger)}
+.chip.solo{background:var(--lime-soft);color:var(--lime-ink)}
 .chip.lock{background:var(--warn-soft);color:var(--warn)}
 .u-actions{display:flex;gap:6px}
 .u-panel{grid-column:1/-1;display:flex;flex-direction:column;gap:12px;padding-top:6px}
@@ -143,6 +144,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
           <div class="f"><label for="a-role">Access</label>
             <select id="a-role"><option value="user">Scanner only</option><option value="admin">Admin (can manage users)</option></select>
             <label class="check" for="a-del"><input type="checkbox" id="a-del"> Can delete from the shared list</label>
+            <label class="check" for="a-solo"><input type="checkbox" id="a-solo"> Standalone (keeps their contacts private)</label>
           </div>
           <div class="f" style="grid-column:1/-1"><label for="a-secret" id="a-secret-label">Password</label>
             <div class="secret-row"><input id="a-secret" class="mono" autocomplete="off" spellcheck="false"><button class="btn btn-quiet" id="a-gen" type="button">Generate</button></div>
@@ -156,7 +158,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       <div class="panel" id="created" hidden></div>
 
       <div class="list" id="users"><div class="empty">Loading users…</div></div>
-      <p class="hint">Everyone can see and add to the shared contact list and edit what they added. Admins, and anyone you allow, can delete from it. Switching someone off or resetting their login signs them out everywhere straight away. The built-in <span class="mono">admin</span> login always works with the ADMIN_PASSWORD set in Cloudflare.</p>
+      <p class="hint">Everyone can see and add to the shared contact list and edit what they added. Admins, and anyone you allow, can delete from it. Standalone users keep a private list that only they see; use "Share their private contacts" to copy it into the shared list. Switching someone off or resetting their login signs them out everywhere straight away. The built-in <span class="mono">admin</span> login always works with the ADMIN_PASSWORD set in Cloudflare.</p>
     </div>
   </div>
 </div>
@@ -258,10 +260,12 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     const nm = el("div","u-name"); nm.append(el("span", null, u.name || u.username));
     if (u.role === "admin") nm.append(el("span","chip admin","Admin"));
     else if (u.canDelete) nm.append(el("span","chip","Can delete"));
+    if (u.standalone) nm.append(el("span","chip solo","Standalone"));
     nm.append(el("span","chip", u.type === "pin" ? "PIN" : "Password"));
     if (u.disabled) nm.append(el("span","chip off","Switched off"));
     if (u.lockedUntil && u.lockedUntil > now) nm.append(el("span","chip lock","Locked"));
-    main.append(nm, el("div","u-meta", u.username + " · last signed in " + fmt(u.lastLogin) + " · " + (u.scans || 0) + " scan" + (u.scans === 1 ? "" : "s")));
+    main.append(nm, el("div","u-meta", u.username + " · last signed in " + fmt(u.lastLogin) + " · " + (u.scans || 0) + " scan" + (u.scans === 1 ? "" : "s")
+      + (u.contacts != null ? " · " + u.contacts + " contact" + (u.contacts === 1 ? "" : "s") + (u.privateContacts ? " (" + u.privateContacts + " private)" : "") : "")));
     const acts = el("div","u-actions");
     const manage = el("button","btn btn-quiet btn-sm","Manage"); manage.type = "button";
     manage.onclick = () => { openRow = openRow === u.username ? null : u.username; render(); };
@@ -323,6 +327,9 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       role.onclick = () => act({ role: u.role === "admin" ? "user" : "admin" }, u.role === "admin" ? "Admin access removed" : "Now an admin");
       const off = el("button","btn btn-quiet btn-sm", u.disabled ? "Switch on" : "Switch off"); off.type = "button";
       off.onclick = () => act({ disabled: !u.disabled }, u.disabled ? "Switched on" : "Switched off and signed out");
+      const solo = el("button","btn btn-quiet btn-sm", u.standalone ? "Turn off standalone" : "Make standalone"); solo.type = "button";
+      solo.onclick = () => act({ standalone: !u.standalone }, u.standalone ? "New contacts will go to the shared list" : "Now standalone. New contacts stay private");
+      rowB.append(solo);
       if (u.role !== "admin") {
         const cd = el("button","btn btn-quiet btn-sm", u.canDelete ? "Remove delete rights" : "Allow deleting from shared list"); cd.type = "button";
         cd.onclick = () => act({ canDelete: !u.canDelete }, u.canDelete ? "Delete rights removed" : "Can now delete from the shared list");
@@ -342,6 +349,17 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
         conf.append(no, yes); rowB.append(conf);
       };
       rowB.append(role, off, del);
+    }
+    if (u.privateContacts) {
+      const sh = el("div","row");
+      const shb = el("button","btn btn-brand btn-sm","Share their " + u.privateContacts + " private contact" + (u.privateContacts === 1 ? "" : "s") + " with everyone"); shb.type = "button";
+      shb.onclick = async () => {
+        shb.disabled = true;
+        try { const d = await api("/admin/share", { username: u.username }); u.privateContacts = 0; toast("Shared " + d.shared + " contact" + (d.shared === 1 ? "" : "s") + " with everyone"); render(); }
+        catch (e) { shb.disabled = false; if (e.code !== "signed_out") say("err", errText(e, e.code === "not_found" ? "Paste the latest worker.js into Cloudflare first." : "Couldn't share them. Try again.")); }
+      };
+      sh.append(shb);
+      p.append(sh);
     }
     p.append(rowB, status);
     return p;
@@ -376,7 +394,10 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     $("#a-go").disabled = true;
     try {
       let d = await api("/admin/create", body);
-      if ($("#a-del").checked && body.role !== "admin") d = await api("/admin/update", { username: d.user.username, canDelete: true });
+      const extra = {};
+      if ($("#a-del").checked && body.role !== "admin") extra.canDelete = true;
+      if ($("#a-solo").checked) extra.standalone = true;
+      if (Object.keys(extra).length) d = await api("/admin/update", { username: d.user.username, ...extra });
       users.push(d.user); render();
       $("#addPanel").hidden = true; $("#addPanel").reset(); delete $("#a-user").dataset.touched;
       showCreds(d.user, body.secret, "Created");

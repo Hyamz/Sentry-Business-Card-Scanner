@@ -304,7 +304,14 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       t.onabort = () => rej(t.error);
     });
   }
-  const canDel = () => !!(session && (session.user.role === "admin" || session.user.canDelete));
+  const solo = () => !!(session && session.user.standalone);
+  const canDel = c => !!(session && (session.user.role === "admin" || (c.createdBy === session.user.username && c.shared === false) || (session.user.canDelete && c.shared !== false)));
+  function applyUser(u){
+    $("#who").textContent = "Signed in as " + (u.name || u.username) + (u.standalone ? " (private list)" : "");
+    $("#adminLink").hidden = $("#adminDot").hidden = u.role !== "admin";
+    document.querySelector(".scope-row").hidden = !!u.standalone;
+    if (u.standalone) scope = "all";
+  }
   const canEdit = c => !!(session && (session.user.role === "admin" || c.createdBy === session.user.username));
   async function saveContact(c){
     const d = await api("/contacts/save", { contact: c });
@@ -415,8 +422,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
 
   async function loadContacts(){
     const u = session.user;
-    $("#who").textContent = "Signed in as " + (u.name || u.username);
-    $("#adminLink").hidden = $("#adminDot").hidden = u.role !== "admin";
+    applyUser(u);
     mode = "loading"; render();
     await refreshList(false);
     offerMigration(u.username);
@@ -463,8 +469,9 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       const d = await api("/me");
       session.user = d.user;
       try { localStorage.setItem(SKEY, JSON.stringify(session)); } catch {}
-      $("#who").textContent = "Signed in as " + (d.user.name || d.user.username);
-      $("#adminLink").hidden = $("#adminDot").hidden = d.user.role !== "admin";
+      const wasSolo = solo();
+      applyUser(d.user);
+      if (wasSolo !== !!d.user.standalone) refreshList(true);
     } catch {}
   }
 
@@ -494,14 +501,14 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     res.replaceChildren();
     $("#count").textContent = contacts.length + (contacts.length === 1 ? " contact" : " contacts");
     if (mode === "loading") {
-      res.append(emptyBox("Loading the shared list…", "Every card the team scans appears here, newest first."));
+      res.append(emptyBox(solo() ? "Loading your contacts…" : "Loading the shared list…", solo() ? "Cards you scan appear here, newest first." : "Every card the team scans appears here, newest first."));
       return;
     }
     const list = visible();
     $("#export").hidden = !list.length;
     $("#exportLabel").textContent = query && list.length !== contacts.length ? "Export " + list.length + " to CSV" : "Export CSV";
     if (mode === "error") { res.append(emptyBox("Shared list unavailable", "Tap Refresh to try again.")); return; }
-    if (!contacts.length) { res.append(emptyBox("No contacts yet", "Tap “Scan a card” to add the first business card to the shared list.")); return; }
+    if (!contacts.length) { res.append(emptyBox("No contacts yet", solo() ? "Tap “Scan a card” to add your first business card. Your list is private to you." : "Tap “Scan a card” to add the first business card to the shared list.")); return; }
     if (!list.length && scope === "mine" && !query) { res.append(emptyBox("You haven't added any yet", "Cards you scan will show here. Switch to Everyone to see the whole team's list.")); return; }
     if (!list.length) { res.append(emptyBox("No matches", "Nothing matches “" + query + "”. Try a name, company, email or number.")); return; }
 
@@ -537,7 +544,8 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     const t = el("div","row-time");
     if (Date.now() - (c.createdAt||0) < 6*36e5) { t.append(el("span","pill-new","New"), document.createElement("br")); }
     t.append(document.createTextNode(fmtTime(c.createdAt||0)));
-    if (c.createdByName) t.append(el("span","row-by", c.createdBy === (session && session.user.username) ? "You" : String(c.createdByName).split(" ")[0]));
+    if (c.shared === false && !solo()) t.append(el("span","row-by","Private"));
+    else if (c.createdByName && !solo()) t.append(el("span","row-by", c.createdBy === (session && session.user.username) ? "You" : String(c.createdByName).split(" ")[0]));
     b.append(avatarFor(c), main, t);
     b.onclick = () => openDetail(c.id);
     return b;
@@ -892,7 +900,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       save.disabled = true;
       try {
         await saveContact(c);
-        closeSheet(); toast(opts.isNew ? "Added to the shared list" : "Changes saved");
+        closeSheet(); toast(opts.isNew ? (solo() ? "Saved to your contacts" : "Added to the shared list") : "Changes saved");
       } catch (e) {
         save.disabled = false;
         if (e && e.code === "signed_out") return;
@@ -933,7 +941,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     info.append(el("h2","d-name", c.name || c.company || "Unnamed contact"));
     const role = [c.title, c.name ? c.company : ""].filter(Boolean).join(" · ");
     if (role) info.append(el("div","d-role", role));
-    info.append(el("div","added", "Added by " + (c.createdBy === session.user.username ? "you" : (c.createdByName || c.createdBy || "someone")) + " · " + fmtFull(c.createdAt||0) + (c.updatedAt && c.updatedAt - c.createdAt > 60000 ? " · edited " + fmtFull(c.updatedAt) : "")));
+    info.append(el("div","added", "Added by " + (c.createdBy === session.user.username ? "you" : (c.createdByName || c.createdBy || "someone")) + " · " + fmtFull(c.createdAt||0) + (c.updatedAt && c.updatedAt - c.createdAt > 60000 ? " · edited " + fmtFull(c.updatedAt) : "") + (c.shared === false ? " · private" : "")));
     hero.append(avatarFor(c), info); s.append(hero);
 
     const list = el("div","d-list");
@@ -980,10 +988,10 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     const sh = el("button","btn btn-lime" + (canEdit(c) ? "" : " grow"),"Share"); sh.type="button";
     act.insertBefore(sh, canEdit(c) ? (act.children[1] || null) : act.firstChild);
     const del = el("button","btn btn-danger","Delete"); del.type="button";
-    if (canDel()) act.append(del);
+    if (canDel(c)) act.append(del);
     s.append(act);
     const conf = el("div","confirm"); conf.hidden = true;
-    conf.append(el("span",null,"Delete from the shared list for everyone?"));
+    conf.append(el("span",null, c.shared === false ? "Delete this contact for good?" : "Delete from the shared list for everyone?"));
     const yes = el("button","btn btn-danger","Delete"); yes.type="button"; yes.style.boxShadow="inset 0 0 0 1.5px currentColor";
     const no = el("button","btn btn-quiet","Keep"); no.type="button";
     const cb = el("div"); cb.style.display="flex"; cb.style.gap="8px"; cb.append(no,yes); conf.append(cb);
@@ -1024,7 +1032,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     no.onclick = () => { conf.hidden = true; };
     yes.onclick = async () => {
       yes.disabled = true;
-      try { await removeContact(c.id); closeSheet(); toast("Deleted from the shared list"); }
+      try { await removeContact(c.id); closeSheet(); toast(c.shared === false ? "Contact deleted" : "Deleted from the shared list"); }
       catch (e) { yes.disabled = false; if (!e || e.code !== "signed_out") toast((e && e.data && e.data.message) || "Couldn't delete. Try again."); }
     };
     openSheet();

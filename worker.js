@@ -76,6 +76,7 @@ const publicUser = u => ({
   username: u.username, name: u.name || "", role: u.role, type: u.type, disabled: !!u.disabled,
   createdAt: u.createdAt, lastLogin: u.lastLogin || null, scans: u.scans || 0,
   canDelete: u.role === "admin" || !!u.canDelete,
+  standalone: !!u.standalone,
   lockedUntil: u.lockedUntil && u.lockedUntil > Date.now() ? u.lockedUntil : null,
 });
 
@@ -180,6 +181,14 @@ async function listUsers(env) {
     cursor = page.list_complete ? null : page.cursor;
   } while (cursor);
   out.sort((a, b) => (a.name || a.username).localeCompare(b.name || b.username));
+  if (env.DB) {
+    try {
+      await ensureTable(env);
+      const { results } = await env.DB.prepare("SELECT created_by, SUM(CASE WHEN shared = 0 THEN 1 ELSE 0 END) AS priv, COUNT(*) AS total FROM contacts GROUP BY created_by").all();
+      const m = new Map(results.map(r => [r.created_by, r]));
+      for (const u of out) { const r = m.get(u.username); u.privateContacts = r ? r.priv || 0 : 0; u.contacts = r ? r.total : 0; }
+    } catch (e) { console.log("count error", e && e.message); }
+  }
   return reply(200, { users: out });
 }
 
@@ -223,6 +232,7 @@ async function updateUser(env, me, body) {
   }
   if (body.unlock) { user.fails = 0; user.lockedUntil = null; }
   if (typeof body.canDelete === "boolean") user.canDelete = body.canDelete;
+  if (typeof body.standalone === "boolean") user.standalone = body.standalone;
   await putUser(env, user);
   return reply(200, { user: publicUser(user) });
 }
@@ -293,7 +303,9 @@ async function ensureTable(env) {
   await env.DB.prepare(`CREATE TABLE IF NOT EXISTS contacts (
     id TEXT PRIMARY KEY, data TEXT NOT NULL, photo TEXT,
     created_at INTEGER NOT NULL, created_by TEXT NOT NULL, created_by_name TEXT,
-    updated_at INTEGER NOT NULL, updated_by TEXT)`).run();
+    updated_at INTEGER NOT NULL, updated_by TEXT, shared INTEGER NOT NULL DEFAULT 1)`).run();
+  const { results } = await env.DB.prepare("PRAGMA table_info(contacts)").all();
+  if (!results.some(c => c.name === "shared")) await env.DB.prepare("ALTER TABLE contacts ADD COLUMN shared INTEGER NOT NULL DEFAULT 1").run();
   tableReady = true;
 }
 const FIELDS = ["name", "title", "company", "phone", "mobile", "email", "website", "address", "notes"];
@@ -313,19 +325,22 @@ const validPhoto = p => typeof p === "string" && /^data:image\/(jpeg|png|webp);b
 const rowOut = r => ({
   id: r.id, ...JSON.parse(r.data), createdAt: r.created_at, createdBy: r.created_by,
   createdByName: r.created_by_name || r.created_by, updatedAt: r.updated_at, updatedBy: r.updated_by,
-  hasPhoto: !!r.has_photo, ...(r.photo !== undefined ? { photo: r.photo || "" } : {}),
+  hasPhoto: !!r.has_photo, shared: r.shared !== 0, ...(r.photo !== undefined ? { photo: r.photo || "" } : {}),
 });
 
-async function listContacts(env) {
-  const { results } = await env.DB.prepare(
-    "SELECT id, data, created_at, created_by, created_by_name, updated_at, updated_by, (photo IS NOT NULL AND photo != '') AS has_photo FROM contacts ORDER BY created_at DESC"
-  ).all();
+const COLS = "id, data, created_at, created_by, created_by_name, updated_at, updated_by, shared, (photo IS NOT NULL AND photo != '') AS has_photo";
+// Standalone users see only their own contacts. Everyone else sees the shared list plus any private ones of their own.
+async function listContacts(env, me) {
+  const { results } = me.standalone
+    ? await env.DB.prepare("SELECT " + COLS + " FROM contacts WHERE created_by = ? ORDER BY created_at DESC").bind(me.username).all()
+    : await env.DB.prepare("SELECT " + COLS + " FROM contacts WHERE shared = 1 OR created_by = ? ORDER BY created_at DESC").bind(me.username).all();
   return reply(200, { contacts: results.map(rowOut) });
 }
-async function getContact(env, body) {
+const canSee = (me, r) => r.created_by === me.username || (r.shared !== 0 && !me.standalone) || me.role === "admin";
+async function getContact(env, me, body) {
   if (!validId(body.id)) return reply(400, { error: "bad_request" });
   const r = await env.DB.prepare("SELECT *, (photo IS NOT NULL AND photo != '') AS has_photo FROM contacts WHERE id = ?").bind(body.id).first();
-  return r ? reply(200, { contact: rowOut(r) }) : reply(404, { error: "not_found", message: "That contact has been deleted." });
+  return r && canSee(me, r) ? reply(200, { contact: rowOut(r) }) : reply(404, { error: "not_found", message: "That contact has been deleted." });
 }
 async function saveContact(env, me, body) {
   const c = body.contact || {};
@@ -343,14 +358,17 @@ async function saveContact(env, me, body) {
     }
   } else {
     const created = Number.isFinite(c.createdAt) && c.createdAt > 0 && c.createdAt <= now ? c.createdAt : now;
-    await env.DB.prepare("INSERT INTO contacts (id, data, photo, created_at, created_by, created_by_name, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(c.id, JSON.stringify(data), validPhoto(c.photo) ? c.photo : null, created, me.username, me.name || me.username, now, me.username).run();
+    await env.DB.prepare("INSERT INTO contacts (id, data, photo, created_at, created_by, created_by_name, updated_at, updated_by, shared) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(c.id, JSON.stringify(data), validPhoto(c.photo) ? c.photo : null, created, me.username, me.name || me.username, now, me.username, me.standalone ? 0 : 1).run();
   }
-  return getContact(env, { id: c.id });
+  return getContact(env, me, { id: c.id });
 }
 async function deleteContact(env, me, body) {
-  if (!(me.role === "admin" || me.canDelete)) return reply(403, { error: "no_delete", message: "You don't have permission to delete from the shared list." });
   if (!validId(body.id)) return reply(400, { error: "bad_request" });
+  const r = await env.DB.prepare("SELECT created_by, shared FROM contacts WHERE id = ?").bind(body.id).first();
+  if (!r) return reply(200, { ok: true });
+  const ownPrivate = r.created_by === me.username && r.shared === 0;
+  if (!(ownPrivate || me.role === "admin" || (me.canDelete && canSee(me, r)))) return reply(403, { error: "no_delete", message: "You don't have permission to delete from the shared list." });
   await env.DB.prepare("DELETE FROM contacts WHERE id = ?").bind(body.id).run();
   return reply(200, { ok: true });
 }
@@ -363,8 +381,8 @@ async function importContacts(env, me, body) {
     const data = cleanContact(c);
     if (!hasContent(data)) continue;
     const created = Number.isFinite(c.createdAt) && c.createdAt > 0 && c.createdAt <= now ? c.createdAt : now;
-    stmts.push(env.DB.prepare("INSERT OR IGNORE INTO contacts (id, data, photo, created_at, created_by, created_by_name, updated_at, updated_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
-      .bind(c.id, JSON.stringify(data), validPhoto(c.photo) ? c.photo : null, created, me.username, me.name || me.username, now, me.username));
+    stmts.push(env.DB.prepare("INSERT OR IGNORE INTO contacts (id, data, photo, created_at, created_by, created_by_name, updated_at, updated_by, shared) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+      .bind(c.id, JSON.stringify(data), validPhoto(c.photo) ? c.photo : null, created, me.username, me.name || me.username, now, me.username, me.standalone ? 0 : 1));
   }
   let added = 0;
   if (stmts.length) {
@@ -408,8 +426,8 @@ async function handle(request, env) {
     if (path.startsWith("/contacts/")) {
       if (!env.DB) return reply(500, { error: "no_database" });
       await ensureTable(env);
-      if (path === "/contacts/list") return listContacts(env);
-      if (path === "/contacts/get") return getContact(env, body);
+      if (path === "/contacts/list") return listContacts(env, me);
+      if (path === "/contacts/get") return getContact(env, me, body);
       if (path === "/contacts/save") return saveContact(env, me, body);
       if (path === "/contacts/delete") return deleteContact(env, me, body);
       if (path === "/contacts/import") return importContacts(env, me, body);
@@ -421,6 +439,13 @@ async function handle(request, env) {
       if (path === "/admin/create") return createUser(env, me, body);
       if (path === "/admin/update") return updateUser(env, me, body);
       if (path === "/admin/delete") return deleteUser(env, me, body);
+      if (path === "/admin/share") {
+        if (!env.DB) return reply(500, { error: "no_database" });
+        await ensureTable(env);
+        const u = cleanUsername(body.username);
+        const r = await env.DB.prepare("UPDATE contacts SET shared = 1 WHERE created_by = ? AND shared = 0").bind(u).run();
+        return reply(200, { shared: (r.meta && r.meta.changes) || 0 });
+      }
     }
     return reply(404, { error: "not_found" });
   }
