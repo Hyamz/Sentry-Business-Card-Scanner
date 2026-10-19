@@ -931,6 +931,18 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     }
     if (avatarVal) showAvatar("");
     let photoLookup = 0;
+    async function findLogo(){
+      const email = inputs.email.value.trim(), website = inputs.website.value.trim();
+      const run = ++photoLookup;
+      ph.hidden = false; ph.replaceChildren(el("span","spin"), el("span","ph-text","Getting their company logo…"));
+      try {
+        const d = await api("/findphoto", { email, website, logoOnly: true });
+        if (run !== photoLookup || !ph.isConnected) return;
+        const pic = d.logo ? await squareImage(d.logo, false).catch(() => null) : null;
+        if (pic) { avatarVal = pic; avatarChanged = true; showAvatar("Using the " + d.site + " logo."); }
+        else showAvatar("");
+      } catch { if (run === photoLookup) showAvatar(""); }
+    }
     async function findPhoto(manual){
       const name = inputs.name.value.trim(), email = inputs.email.value.trim(), website = inputs.website.value.trim();
       if (!name && !email && !website) { if (manual) toast("Add a name and their email or website first"); return; }
@@ -950,7 +962,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
         t.append(el("strong",null, "Is this " + (name || "them") + "?"), el("span",null, d.source === "gravatar" ? "Found on Gravatar (linked to their email)." : "Found on " + d.site + "."));
         const a = el("div","ph-actions");
         a.append(phBtn("Use photo","btn-brand", () => { avatarVal = pic; avatarChanged = true; showAvatar(d.source === "gravatar" ? "From Gravatar." : "From " + d.site + "."); }),
-                 phBtn("Not them","btn-quiet", () => { showAvatar(""); }));
+                 phBtn("Not them","btn-quiet", () => findLogo()));
         t.append(a); ph.append(i, t);
       } else if (d.logo) {
         const pic = await squareImage(d.logo, false).catch(() => null);

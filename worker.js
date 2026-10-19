@@ -370,7 +370,7 @@ async function findPhoto(env, body) {
   let logoPage = null;
 
   // 1. The company's own website
-  if (first && last) {
+  if (first && last && !body.logoOnly) {
     for (const d of domains) {
       let home;
       try { home = await fetchText("https://" + d + "/", 500000); } catch { try { home = await fetchText("https://www." + d + "/", 500000); } catch { continue; } }
@@ -419,7 +419,7 @@ async function findPhoto(env, body) {
 
   // 2. Gravatar
   const email = String(body.email || "").trim().toLowerCase();
-  if (/^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(email)) {
+  if (!body.logoOnly && /^[^@\s]+@[^@\s]+\.[a-z]{2,}$/.test(email)) {
     const hash = [...new Uint8Array(await crypto.subtle.digest("SHA-256", enc.encode(email)))].map(b => b.toString(16).padStart(2, "0")).join("");
     const img = await fetchImage("https://gravatar.com/avatar/" + hash + "?s=400&d=404").catch(() => null);
     if (img) return reply(200, { photo: img, source: "gravatar" });
