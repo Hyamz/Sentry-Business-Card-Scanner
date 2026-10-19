@@ -169,7 +169,11 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
 .seg button{border:0;background:transparent;border-radius:9px;padding:9px;font-weight:600;cursor:pointer;color:var(--muted)}
 .seg button[aria-pressed="true"]{background:var(--surface);color:var(--fg);box-shadow:0 1px 3px rgba(0,0,0,.12)}
 .scope-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:-6px}
-.seg.scope{flex:0 1 300px}
+.who-filter{display:flex;align-items:center;gap:8px;flex:0 1 340px;min-width:0;font-size:13px;font-weight:600;color:var(--muted)}
+.who-filter select{flex:1;min-width:0;background:var(--surface);color:var(--fg);border:1.5px solid var(--line);border-radius:10px;padding:8px 10px;font-size:15px;font-weight:500}
+.who-sum{display:flex;flex-wrap:wrap;gap:4px 18px;align-items:baseline;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14px;color:var(--muted);font-variant-numeric:tabular-nums}
+.who-sum strong{font-family:var(--f-display);font-size:17px;color:var(--fg)}
+.who-sum b{font-family:var(--f-display);font-size:18px;color:var(--fg);margin-right:3px}
 .row-by{display:block;font-family:var(--f-body);font-size:12px;max-width:110px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .migrate{display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:10px;background:var(--lime-soft);color:var(--lime-ink);border-radius:12px;padding:12px 14px;font-size:14px}
 .pin-input{letter-spacing:.5em;text-align:center;font-family:var(--f-mono)}
@@ -225,10 +229,9 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
   </div>
 
   <div class="scope-row">
-    <div class="seg scope" role="group" aria-label="Show contacts">
-      <button type="button" id="sc-all" aria-pressed="true">Everyone</button>
-      <button type="button" id="sc-mine" aria-pressed="false">Added by me</button>
-    </div>
+    <label class="who-filter" for="byUser"><span>Added by</span>
+      <select id="byUser"><option value="all">Everyone</option></select>
+    </label>
     <button class="link-btn" id="refresh" type="button">Refresh</button>
   </div>
 
@@ -456,9 +459,39 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
   $("#refresh").onclick = async () => { await refreshList(false); toast("List updated"); };
 
   let scope = "all";
-  const setScope = v => { scope = v; $("#sc-all").setAttribute("aria-pressed", String(v === "all")); $("#sc-mine").setAttribute("aria-pressed", String(v === "mine")); render(); };
-  $("#sc-all").onclick = () => setScope("all");
-  $("#sc-mine").onclick = () => setScope("mine");
+  $("#byUser").onchange = e => { scope = e.target.value; render(); };
+
+  // Fill the "Added by" list with everyone who has added contacts, with their counts.
+  function buildUserFilter(){
+    const sel = $("#byUser"), me = session && session.user.username;
+    const counts = new Map();
+    for (const c of contacts) {
+      const k = c.createdBy || "?";
+      const e = counts.get(k) || { name: c.createdByName || k, n: 0 };
+      e.n++; counts.set(k, e);
+    }
+    if (scope !== "all" && !counts.has(scope) && scope !== me) scope = "all";
+    const opts = [["all", "Everyone (" + contacts.length + ")"], [me, "Me (" + ((counts.get(me) || {}).n || 0) + ")"]];
+    [...counts.entries()].filter(([k]) => k !== me).sort((a, b) => b[1].n - a[1].n || a[1].name.localeCompare(b[1].name))
+      .forEach(([k, v]) => opts.push([k, v.name + " (" + v.n + ")"]));
+    sel.replaceChildren(...opts.map(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; o.selected = v === scope; return o; }));
+  }
+  function userSummary(){
+    const mine = contacts.filter(c => c.createdBy === scope);
+    const me = session && session.user.username;
+    const name = scope === me ? "You" : ((mine[0] && mine[0].createdByName) || scope);
+    const now = Date.now(), week = mine.filter(c => now - (c.createdAt || 0) < 7 * 864e5).length;
+    const today = mine.filter(c => dayLabel(c.createdAt || 0) === "Today").length;
+    const last = mine.reduce((m, c) => Math.max(m, c.createdAt || 0), 0);
+    const box = el("div","who-sum");
+    box.append(el("strong", null, name));
+    const stat = (n, label) => { const sp = el("span"); sp.append(el("b", null, String(n)), document.createTextNode(label)); box.append(sp); };
+    stat(mine.length, mine.length === 1 ? "contact uploaded" : "contacts uploaded");
+    stat(week, "this week");
+    stat(today, "today");
+    if (last) box.append(el("span", null, "Last added " + fmtFull(last)));
+    return box;
+  }
 
   async function boot(){
     render();
@@ -504,12 +537,14 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       res.append(emptyBox(solo() ? "Loading your contacts…" : "Loading the shared list…", solo() ? "Cards you scan appear here, newest first." : "Every card the team scans appears here, newest first."));
       return;
     }
+    if (!solo()) buildUserFilter();
     const list = visible();
+    if (scope !== "all" && !solo()) res.append(userSummary());
     $("#export").hidden = !list.length;
-    $("#exportLabel").textContent = query && list.length !== contacts.length ? "Export " + list.length + " to CSV" : "Export CSV";
+    $("#exportLabel").textContent = list.length !== contacts.length ? "Export " + list.length + " to CSV" : "Export CSV";
     if (mode === "error") { res.append(emptyBox("Shared list unavailable", "Tap Refresh to try again.")); return; }
     if (!contacts.length) { res.append(emptyBox("No contacts yet", solo() ? "Tap “Scan a card” to add your first business card. Your list is private to you." : "Tap “Scan a card” to add the first business card to the shared list.")); return; }
-    if (!list.length && scope === "mine" && !query) { res.append(emptyBox("You haven't added any yet", "Cards you scan will show here. Switch to Everyone to see the whole team's list.")); return; }
+    if (!list.length && scope !== "all" && !query) { res.append(emptyBox(scope === session.user.username ? "You haven't added any yet" : "No contacts from this person", "Choose Everyone to see the whole team's list.")); return; }
     if (!list.length) { res.append(emptyBox("No matches", "Nothing matches “" + query + "”. Try a name, company, email or number.")); return; }
 
     const groups = new Map();
@@ -1109,7 +1144,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     const me = session && session.user.username;
     return contacts
-      .filter(c => scope !== "mine" || c.createdBy === me)
+      .filter(c => scope === "all" || c.createdBy === scope)
       .filter(c => !terms.length || terms.every(t => haystack(c).includes(t)))
       .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
   }
