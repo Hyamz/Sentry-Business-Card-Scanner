@@ -59,6 +59,9 @@ header.top{align-items:flex-end}
 .scan p{margin:0;opacity:.85;max-width:44ch}
 .scan .frame{position:absolute;right:-18px;top:16px;width:120px;height:74px;border:2px dashed currentColor;border-radius:10px;opacity:.22;transform:rotate(-8deg)}
 .scan-actions{display:flex;flex-wrap:wrap;gap:10px}
+.qr-view{position:relative;border-radius:14px;overflow:hidden;background:#000;aspect-ratio:1/1;max-height:58vh;margin-inline:auto;width:100%}
+.qr-view video{width:100%;height:100%;object-fit:cover;display:block}
+.qr-frame{position:absolute;inset:18%;border:3px solid var(--lime);border-radius:16px;box-shadow:0 0 0 2000px rgba(0,0,0,.35)}
 .btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;border:0;border-radius:12px;padding:12px 16px;font-weight:600;cursor:pointer;min-height:46px;text-decoration:none}
 .btn svg{width:18px;height:18px;flex:none}
 .btn-lime{background:var(--lime);color:#1b2a00}
@@ -191,13 +194,18 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
   <section class="scan">
     <div class="frame" aria-hidden="true"></div>
     <h2>Snap a business card, get a contact.</h2>
-    <p>Name, company, phone, email, website and social links are read from the photo. Check them, then save.</p>
+    <p>Photograph a card, or scan the QR code on it. Name, company, phone, email, website and social links are filled in for you to check, then save.</p>
     <div class="scan-actions">
       <label class="btn btn-lime" for="cam">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 8h3l2-3h6l2 3h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.5"/></svg>
         Scan a card
       </label>
       <input class="visually-hidden" type="file" id="cam" accept="image/*" capture="environment">
+      <button class="btn btn-lime" id="qrBtn" type="button">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3M21 14v.01M14 21h3M21 18v3M17.5 17.5h.01"/></svg>
+        Scan QR code
+      </button>
+      <input class="visually-hidden" type="file" id="qrPhoto" accept="image/*" capture="environment">
       <label class="btn btn-ghost" for="pick">Upload photo</label>
       <input class="visually-hidden" type="file" id="pick" accept="image/*">
       <button class="btn btn-ghost" id="manual" type="button">Add manually</button>
@@ -533,7 +541,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
 
   /* ---------- sheets ---------- */
   function openSheet(){ $("#scrim").hidden = false; $("#sheet").hidden = false; $("#sheet").scrollTop = 0; }
-  function closeSheet(){ if (scanCtl) scanCtl.abort(); $("#scrim").hidden = true; $("#sheet").hidden = true; $("#sheet").replaceChildren(); }
+  function closeSheet(){ stopQR(); if (scanCtl) scanCtl.abort(); $("#scrim").hidden = true; $("#sheet").hidden = true; $("#sheet").replaceChildren(); }
   $("#scrim").onclick = closeSheet;
   document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#sheet").hidden) closeSheet(); });
   function sheetHead(title){
@@ -548,6 +556,200 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
   let scanCtl = null;
   $("#cam").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) startScan(f); };
   $("#pick").onchange = e => { const f = e.target.files[0]; e.target.value = ""; if (f) startScan(f); };
+  /* ---------- QR code contact parsing ---------- */
+  function parseQRText(raw){
+    const text = String(raw || "").trim();
+    const r = { name:"", title:"", company:"", phone:"", mobile:"", email:"", website:"", address:"", notes:"", socials:[] };
+    const addPhone = (num, cell) => { num = num.trim(); if (!num) return; if (cell && !r.mobile) r.mobile = num; else if (!r.phone) r.phone = num; else if (!r.mobile) r.mobile = num; };
+    const addSocial = url => {
+      const u = url.trim(); if (!u) return false;
+      const host = (u.match(/^(?:https?:\/\/)?(?:www\.)?([^\/?#]+)/i) || [])[1] || "";
+      const net = /linkedin\./i.test(host) ? "LinkedIn" : /(^|\.)(x|twitter)\.com$/i.test(host) ? "X / Twitter" : /instagram\./i.test(host) ? "Instagram"
+        : /facebook\.|fb\.com/i.test(host) ? "Facebook" : /youtube\.|youtu\.be/i.test(host) ? "YouTube" : /tiktok\./i.test(host) ? "TikTok" : /wa\.me|whatsapp\./i.test(host) ? "WhatsApp" : "";
+      if (!net) return false;
+      if (!r.socials.some(s => s.url === u)) r.socials.push({ network: net, url: u });
+      return true;
+    };
+    const addUrl = u => { if (!addSocial(u) && !r.website) r.website = u.trim(); };
+
+    if (/^BEGIN:VCARD/i.test(text)) {
+      const unesc = v => v.replace(/\\n/gi, "\n").replace(/\\([,;:\\])/g, "$1");
+      const lines = text.replace(/\r\n|\r/g, "\n").replace(/\n[ \t]/g, "").split("\n");
+      for (const line of lines) {
+        const m = line.match(/^(?:[\w-]+\.)?([A-Za-z-]+)((?:;[^:]*)?):(.*)$/); if (!m) continue;
+        const key = m[1].toUpperCase(), params = m[2].toUpperCase(), val = m[3];
+        if (key === "FN") r.name = unesc(val).trim();
+        else if (key === "N" && !r.name) { const p = val.split(";").map(unesc); r.name = [p[3], p[1], p[2], p[0], p[4]].filter(Boolean).join(" ").trim(); }
+        else if (key === "ORG") r.company = val.split(";").map(unesc).filter(Boolean).join(", ");
+        else if (key === "TITLE" || (key === "ROLE" && !r.title)) r.title = unesc(val).trim();
+        else if (key === "TEL") addPhone(unesc(val).replace(/^tel:/i, ""), /CELL|MOBILE/.test(params));
+        else if (key === "EMAIL" && !r.email) r.email = unesc(val).replace(/^mailto:/i, "").trim();
+        else if (key === "URL") addUrl(unesc(val));
+        else if (key === "ADR" && !r.address) r.address = val.split(";").map(unesc).map(s => s.trim()).filter(Boolean).join(", ");
+        else if (key === "NOTE") r.notes = unesc(val).trim();
+        else if (key === "X-SOCIALPROFILE") { const u = unesc(val).trim(); if (!addSocial(u)) { const t = (params.match(/TYPE=([^;]+)/) || [])[1] || ""; const net = { LINKEDIN:"LinkedIn", TWITTER:"X / Twitter", X:"X / Twitter", INSTAGRAM:"Instagram", FACEBOOK:"Facebook", YOUTUBE:"YouTube", TIKTOK:"TikTok", WHATSAPP:"WhatsApp" }[t] || "Other"; r.socials.push({ network: net, url: u }); } }
+      }
+      return { kind: "vcard", contact: r };
+    }
+    if (/^MECARD:/i.test(text)) {
+      const body = text.slice(7);
+      const parts = body.split(/;(?=[A-Z\-]+:)/i);
+      for (const part of parts) {
+        const i = part.indexOf(":"); if (i < 0) continue;
+        const k = part.slice(0, i).toUpperCase(), v = part.slice(i + 1).replace(/;+$/, "").replace(/\\([;:,\\])/g, "$1");
+        if (k === "N") { const p = v.split(","); r.name = (p.length > 1 ? p[1].trim() + " " + p[0].trim() : v).trim(); }
+        else if (k === "ORG") r.company = v;
+        else if (k === "TITLE") r.title = v;
+        else if (k === "TEL") addPhone(v, false);
+        else if (k === "EMAIL" && !r.email) r.email = v;
+        else if (k === "URL") addUrl(v);
+        else if (k === "ADR") r.address = v;
+        else if (k === "NOTE") r.notes = v;
+      }
+      return { kind: "mecard", contact: r };
+    }
+    if (/^mailto:/i.test(text)) { r.email = decodeURIComponent(text.slice(7).split("?")[0]); return { kind: "email", contact: r }; }
+    if (/^tel:/i.test(text)) { addPhone(text.slice(4), false); return { kind: "phone", contact: r }; }
+    if (/^MATMSG:/i.test(text)) { const m = text.match(/TO:([^;]+)/i); if (m) r.email = m[1]; return { kind: "email", contact: r }; }
+    if (/^https?:\/\//i.test(text)) { addUrl(text); return { kind: "url", url: text, contact: r }; }
+    // Plain text: pick out what we can.
+    const em = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/); if (em) r.email = em[0];
+    const ph = text.match(/\+?\d[\d\s().-]{7,}\d/); if (ph) r.phone = ph[0].trim();
+    const ur = text.match(/https?:\/\/\S+/); if (ur) addUrl(ur[0]);
+    r.notes = text.slice(0, 900);
+    return { kind: "text", contact: r };
+  }
+
+  /* ---------- QR code scanning ---------- */
+  let qrStream = null, qrTimer = null, qrDone = false;
+  function stopQR(){
+    qrDone = true;
+    if (qrTimer) { clearTimeout(qrTimer); qrTimer = null; }
+    if (qrStream) { qrStream.getTracks().forEach(t => t.stop()); qrStream = null; }
+  }
+  let jsQRLoad = null;
+  function loadJsQR(){
+    if (window.jsQR) return Promise.resolve(window.jsQR);
+    if (!jsQRLoad) jsQRLoad = new Promise((res, rej) => {
+      const sc = document.createElement("script");
+      sc.src = "https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.js";
+      sc.onload = () => window.jsQR ? res(window.jsQR) : rej();
+      sc.onerror = () => { jsQRLoad = null; rej(); };
+      document.head.append(sc);
+    });
+    return jsQRLoad;
+  }
+  function decodeCanvas(jsQR, canvas, both){
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const hit = jsQR(img.data, img.width, img.height, { inversionAttempts: both ? "attemptBoth" : "dontInvert" });
+    return hit && hit.data ? hit.data : null;
+  }
+
+  function openQRScanner(){
+    const s = sheetHead("Scan QR code");
+    qrDone = false;
+    const view = el("div","qr-view");
+    const video = document.createElement("video");
+    video.setAttribute("playsinline", ""); video.muted = true; video.autoplay = true;
+    view.append(video, el("div","qr-frame"));
+    const st = el("div","status"); st.append(el("span","spin"), el("span",null,"Starting the camera…"));
+    const say = (kind, text, spin) => { st.className = "status " + (kind || ""); st.replaceChildren(...(spin ? [el("span","spin")] : []), el("span",null,text)); };
+    const act = el("div","actions");
+    const photo = el("label","btn btn-quiet grow","Take a photo of the code instead"); photo.htmlFor = "qrPhoto";
+    const cancel = el("button","btn btn-quiet","Cancel"); cancel.type = "button"; cancel.onclick = closeSheet;
+    act.append(photo, cancel);
+    s.append(view, st, act);
+    openSheet();
+
+    const found = text => { if (qrDone) return; stopQR(); if (navigator.vibrate) try { navigator.vibrate(60); } catch {} handleQR(text); };
+
+    (async () => {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) { view.hidden = true; say("err", "Live scanning isn't available in this browser. Take a photo of the code instead."); return; }
+      try {
+        qrStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 1280 } }, audio: false });
+        if (qrDone) { stopQR(); return; }
+        video.srcObject = qrStream; await video.play().catch(() => {});
+      } catch {
+        view.hidden = true;
+        say("err", "The camera couldn't start. Allow camera access for this site in your browser settings, or take a photo of the code instead.");
+        return;
+      }
+      say("", "Point the camera at the QR code.");
+      let detector = null;
+      try { if ("BarcodeDetector" in window && (await BarcodeDetector.getSupportedFormats()).includes("qr_code")) detector = new BarcodeDetector({ formats: ["qr_code"] }); } catch {}
+      let jsQR = null;
+      if (!detector) { try { jsQR = await loadJsQR(); } catch { say("err", "The QR reader couldn't load. Check your signal and try again."); return; } }
+      const canvas = document.createElement("canvas");
+      const tick = async () => {
+        if (qrDone) return;
+        try {
+          if (video.readyState >= 2 && video.videoWidth) {
+            if (detector) {
+              const codes = await detector.detect(video);
+              if (codes.length && codes[0].rawValue) return found(codes[0].rawValue);
+            } else {
+              const k = Math.min(1, 720 / Math.max(video.videoWidth, video.videoHeight));
+              canvas.width = Math.round(video.videoWidth * k); canvas.height = Math.round(video.videoHeight * k);
+              canvas.getContext("2d", { willReadFrequently: true }).drawImage(video, 0, 0, canvas.width, canvas.height);
+              const t = decodeCanvas(jsQR, canvas, false);
+              if (t) return found(t);
+            }
+          }
+        } catch {}
+        qrTimer = setTimeout(tick, 180);
+      };
+      tick();
+    })();
+  }
+
+  $("#qrBtn").onclick = openQRScanner;
+  $("#qrPhoto").onchange = async e => {
+    const f = e.target.files[0]; e.target.value = ""; if (!f) return;
+    stopQR();
+    try {
+      const jsQR = await loadJsQR();
+      const url = URL.createObjectURL(f);
+      const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = url; });
+      let text = null;
+      for (const max of [1600, 1000, 2400]) {
+        const k = Math.min(1, max / Math.max(img.width, img.height));
+        const c = document.createElement("canvas"); c.width = Math.round(img.width * k); c.height = Math.round(img.height * k);
+        c.getContext("2d", { willReadFrequently: true }).drawImage(img, 0, 0, c.width, c.height);
+        text = decodeCanvas(jsQR, c, true); if (text) break;
+      }
+      URL.revokeObjectURL(url);
+      if (text) handleQR(text);
+      else { closeSheet(); toast("No QR code found in that photo. Try again closer up."); }
+    } catch { closeSheet(); toast("That photo couldn't be read. Try again."); }
+  };
+
+  async function handleQR(text){
+    const p = parseQRText(text);
+    const c = p.contact;
+    const readable = p.kind === "url" && !c.socials.length;
+    const ui = openEditor({ id:newId(), socials:[] }, { isNew:true });
+    ui.fill(c);
+    const got = FIELDS.filter(([k]) => c[k]).length + c.socials.length;
+    if (!readable) {
+      ui.status(got > 1 ? "ok" : "", p.kind === "url" ? "This QR code is a profile link. Add their other details by hand if you have them."
+        : got ? "Read from the QR code. Check the details before saving." : "This QR code didn't hold contact details. Its text is in Notes.");
+      return;
+    }
+    ui.status("", "This QR code is a web link. Reading the contact details from it…");
+    try {
+      const d = await api("/readlink", { url: p.url });
+      const r = d.vcard ? parseQRText(d.vcard).contact : normalise(d.card);
+      ui.fill(r);
+      const n = FIELDS.filter(([k]) => r[k]).length + r.socials.length;
+      ui.status(n ? "ok" : "", n ? "Read " + n + " detail" + (n === 1 ? "" : "s") + " from the link. Check them before saving." : "The link didn't show any contact details. It's saved as the website.");
+    } catch (e) {
+      if (e && e.code === "signed_out") return;
+      ui.status("", e && e.code === "not_found" ? "The link is saved as the website. (Reading details from links needs the latest worker.js in Cloudflare.)"
+        : "Couldn't read details from that link, so it's saved as the website. Add the rest by hand.");
+    }
+  }
+
   $("#manual").onclick = () => openEditor({ id:newId(), socials:[] }, { isNew:true });
 
   async function startScan(file){
