@@ -1231,6 +1231,14 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     for (const so of (c.socials||[])) L.push("X-SOCIALPROFILE;TYPE=" + esc(so.network) + ":" + esc(safeUrl(so.url, so.network) || so.url));
     const n = compact ? (c.notes || "") : [c.notes, "Added " + fmtFull(c.createdAt||Date.now())].filter(Boolean).join("\n");
     if (n) L.push("NOTE:" + esc(n));
+    // Contact picture, so it shows in the phone's address book (too big for a QR code, so left out there).
+    const pm = !compact && typeof c.avatar === "string" && c.avatar.match(/^data:image\/(jpeg|png);base64,([A-Za-z0-9+/=]+)$/);
+    if (pm) {
+      const line = "PHOTO;ENCODING=b;TYPE=" + (pm[1] === "png" ? "PNG" : "JPEG") + ":" + pm[2];
+      const folded = [line.slice(0, 75)];
+      for (let i = 75; i < line.length; i += 74) folded.push(" " + line.slice(i, i + 74));
+      L.push(folded.join("\r\n"));
+    }
     L.push("END:VCARD");
     return L.join("\r\n");
   }
