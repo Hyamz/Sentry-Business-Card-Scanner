@@ -1,0 +1,22 @@
+# Cloudflare deploy settings for the scanner's server (worker.js).
+# Cloudflare Workers Builds runs `npx wrangler deploy` on every push to main.
+# Secrets (ANTHROPIC_API_KEY, ADMIN_PASSWORD, SESSION_SECRET) live only in the
+# Cloudflare dashboard and are kept as they are on each deploy.
+
+name = "sentrycardscanner"
+main = "worker.js"
+compatibility_date = "2025-09-01"
+workers_dev = true
+keep_vars = true
+
+[observability]
+enabled = true
+
+[[kv_namespaces]]
+binding = "USERS"
+id = "3e97633c715244ed93ee2ab82ce3955f"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "sentry-contacts"
+database_id = "5540995a-3a6e-45b3-9707-585a385470a5"
