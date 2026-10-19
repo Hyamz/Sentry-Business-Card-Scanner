@@ -283,7 +283,12 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     const status = el("div","status"); status.hidden = true;
     const say = (kind, msg) => { status.hidden = false; status.className = "status " + kind; status.textContent = msg; };
     const act = async (body, ok) => {
-      try { const d = await api("/admin/update", { username: u.username, ...body }); Object.assign(u, d.user); toast(ok); render(); }
+      try {
+        const d = await api("/admin/update", { username: u.username, ...body });
+        const missed = Object.keys(body).filter(k => typeof body[k] === "boolean" && k !== "unlock" && k in d.user && d.user[k] !== body[k]);
+        if (missed.length) return say("err", "The server didn't save that setting. Paste the latest worker.js into Cloudflare and click Deploy, then try again.");
+        Object.assign(u, d.user); toast(ok); render();
+      }
       catch (e) { if (e.code !== "signed_out") say("err", errText(e, "That didn't work. Try again.")); }
     };
 
@@ -333,12 +338,12 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       solo.onclick = () => act({ standalone: !u.standalone }, u.standalone ? "New contacts will go to the shared list" : "Now standalone. New contacts stay private");
       rowB.append(solo);
       if (u.role !== "admin") {
-        const ex = el("button","btn btn-quiet btn-sm", u.canExport ? "Remove CSV export" : "Allow CSV export"); ex.type = "button";
-        ex.onclick = () => act({ canExport: !u.canExport }, u.canExport ? "CSV export removed" : "Can now export to CSV");
+        const ex = el("button","btn btn-quiet btn-sm", u.canExport ? "Disable CSV export" : "Enable CSV export"); ex.type = "button";
+        ex.onclick = () => act({ canExport: !u.canExport }, u.canExport ? "CSV export disabled" : "CSV export enabled");
         rowB.append(ex);
       }
       if (u.role !== "admin") {
-        const cd = el("button","btn btn-quiet btn-sm", u.canDelete ? "Remove delete rights" : "Allow deleting from shared list"); cd.type = "button";
+        const cd = el("button","btn btn-quiet btn-sm", u.canDelete ? "Disable deleting" : "Enable deleting from shared list"); cd.type = "button";
         cd.onclick = () => act({ canDelete: !u.canDelete }, u.canDelete ? "Delete rights removed" : "Can now delete from the shared list");
         rowB.append(cd);
       }
