@@ -285,7 +285,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     const act = async (body, ok) => {
       try {
         const d = await api("/admin/update", { username: u.username, ...body });
-        const missed = Object.keys(body).filter(k => typeof body[k] === "boolean" && k !== "unlock" && k in d.user && d.user[k] !== body[k]);
+        const missed = Object.keys(body).filter(k => typeof body[k] === "boolean" && k !== "unlock" && d.user[k] !== body[k]);
         if (missed.length) return say("err", "The server didn't save that setting. Paste the latest worker.js into Cloudflare and click Deploy, then try again.");
         Object.assign(u, d.user); toast(ok); render();
       }
