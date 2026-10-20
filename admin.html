@@ -145,6 +145,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       <div class="toolbar">
         <input id="q" type="search" placeholder="Search users" aria-label="Search users">
         <button class="btn btn-lime" id="addBtn" type="button">+ Add user</button>
+        <button class="btn btn-quiet" id="galBtn" type="button" title="Adds or updates every shared contact that has an email address in the Outlook Global Address List">Send shared contacts to Outlook</button>
       </div>
 
       <form class="panel" id="addPanel" hidden novalidate>
@@ -173,7 +174,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       <div class="panel" id="created" hidden></div>
 
       <div class="list" id="users"><div class="empty">Loading users…</div></div>
-      <p class="hint">Everyone can see and add to the shared contact list and edit what they added. Admins, and anyone you allow, can delete from it. Standalone users keep a private list that only they see; use "Share their private contacts" to copy it into the shared list. Switching someone off or resetting their login signs them out everywhere straight away. The built-in <span class="mono">admin</span> login always works with the ADMIN_PASSWORD set in Cloudflare.</p>
+      <p class="hint">Everyone can see and add to the shared contact list and edit what they added. Admins, and anyone you allow, can delete from it. Shared contacts with an email address are added to the Outlook Global Address List automatically; standalone users' private contacts never are. Standalone users keep a private list that only they see; use "Share their private contacts" to copy it into the shared list. Switching someone off or resetting their login signs them out everywhere straight away. The built-in <span class="mono">admin</span> login always works with the ADMIN_PASSWORD set in Cloudflare.</p>
     </div>
   </div>
 </div>
@@ -535,6 +536,15 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
   }
 
   $("#q").addEventListener("input", render);
+  $("#galBtn").onclick = async () => {
+    const b = $("#galBtn"); b.disabled = true; b.textContent = "Sending…";
+    try {
+      const d = await api("/admin/galsync");
+      toast("Sent " + d.queued + " contact" + (d.queued === 1 ? "" : "s") + " to Outlook" + (d.skipped ? " (" + d.skipped + " without an email skipped)" : "") + ". They appear within a few minutes.");
+    } catch (e) {
+      if (e.code !== "signed_out") toast(e.code === "not_found" ? "The server is still updating. Try again in a couple of minutes." : errText(e, "Couldn't send them to Outlook."));
+    } finally { b.disabled = false; b.textContent = "Send shared contacts to Outlook"; }
+  };
   start();
 })();
 </script>

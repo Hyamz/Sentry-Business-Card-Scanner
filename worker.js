@@ -515,7 +515,35 @@ async function getContact(env, me, body) {
   const r = await env.DB.prepare("SELECT *, (photo IS NOT NULL AND photo != '') AS has_photo FROM contacts WHERE id = ?").bind(body.id).first();
   return r && canSee(me, r) ? reply(200, { contact: rowOut(r) }) : reply(404, { error: "not_found", message: "That contact has been deleted." });
 }
-async function saveContact(env, me, body) {
+/* ---------- Outlook Global Address List ---------- */
+// Shared contacts (never standalone/private ones) are sent to an Azure Automation
+// runbook webhook (GAL_WEBHOOK_URL secret), which creates or updates them as
+// Exchange Online mail contacts. Runs in the background so saving stays fast.
+const galPayload = r => {
+  const d = typeof r.data === "string" ? JSON.parse(r.data) : r;
+  return { id: r.id, name: d.name, title: d.title, company: d.company, phone: d.phone, mobile: d.mobile, email: d.email,
+    website: d.website, address: d.address, notes: d.notes, addedBy: r.created_by_name || r.createdByName || "" };
+};
+function galSend(env, ctx, payload) {
+  if (!env.GAL_WEBHOOK_URL) return false;
+  const p = fetch(env.GAL_WEBHOOK_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) })
+    .then(r => { if (!r.ok) console.log("GAL webhook", r.status); }).catch(e => console.log("GAL webhook error", e && e.message));
+  if (ctx && ctx.waitUntil) ctx.waitUntil(p);
+  return true;
+}
+async function galUpsertIds(env, ctx, ids) {
+  if (!env.GAL_WEBHOOK_URL || !ids.length) return 0;
+  let sent = 0;
+  for (let i = 0; i < ids.length; i += 90) {
+    const chunk = ids.slice(i, i + 90);
+    const { results } = await env.DB.prepare("SELECT id, data, created_by_name FROM contacts WHERE shared = 1 AND id IN (" + chunk.map(() => "?").join(",") + ")").bind(...chunk).all();
+    const upsert = results.map(galPayload).filter(c => c.email);
+    if (upsert.length) { galSend(env, ctx, { upsert }); sent += upsert.length; }
+  }
+  return sent;
+}
+
+async function saveContact(env, me, body, ctx) {
   const c = body.contact || {};
   if (!validId(c.id)) return reply(400, { error: "bad_request" });
   const data = cleanContact(c);
@@ -535,18 +563,20 @@ async function saveContact(env, me, body) {
     await env.DB.prepare("INSERT INTO contacts (id, data, photo, created_at, created_by, created_by_name, updated_at, updated_by, shared, avatar) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
       .bind(c.id, JSON.stringify(data), validPhoto(c.photo) ? c.photo : null, created, me.username, me.name || me.username, now, me.username, me.standalone ? 0 : 1, validAvatar(c.avatar) ? c.avatar : null).run();
   }
+  await galUpsertIds(env, ctx, [c.id]);
   return getContact(env, me, { id: c.id });
 }
-async function deleteContact(env, me, body) {
+async function deleteContact(env, me, body, ctx) {
   if (!validId(body.id)) return reply(400, { error: "bad_request" });
   const r = await env.DB.prepare("SELECT created_by, shared FROM contacts WHERE id = ?").bind(body.id).first();
   if (!r) return reply(200, { ok: true });
   const ownPrivate = r.created_by === me.username && r.shared === 0;
   if (!(ownPrivate || me.role === "admin" || (me.canDelete && canSee(me, r)))) return reply(403, { error: "no_delete", message: "You don't have permission to delete from the shared list." });
   await env.DB.prepare("DELETE FROM contacts WHERE id = ?").bind(body.id).run();
+  if (r.shared !== 0) galSend(env, ctx, { remove: [body.id] });
   return reply(200, { ok: true });
 }
-async function importContacts(env, me, body) {
+async function importContacts(env, me, body, ctx) {
   const list = Array.isArray(body.contacts) ? body.contacts.slice(0, 200) : [];
   const now = Date.now();
   const stmts = [];
@@ -559,16 +589,18 @@ async function importContacts(env, me, body) {
       .bind(c.id, JSON.stringify(data), validPhoto(c.photo) ? c.photo : null, created, me.username, me.name || me.username, now, me.username, me.standalone ? 0 : 1));
   }
   let added = 0;
+  const ids = list.filter(c => validId(c.id)).map(c => c.id);
   if (stmts.length) {
     const res = await env.DB.batch(stmts);
     added = res.reduce((n, r) => n + ((r.meta && r.meta.changes) || 0), 0);
   }
+  if (added && !me.standalone) await galUpsertIds(env, ctx, ids);
   return reply(200, { added });
 }
 
 export default {
-  async fetch(request, env) {
-    try { return await handle(request, env); }
+  async fetch(request, env, ctx) {
+    try { return await handle(request, env, ctx); }
     catch (e) {
       console.log("Server error", e && e.stack || e);
       return reply(500, { error: "server_error", message: "Server error: " + ((e && e.message) || "unknown") });
@@ -576,7 +608,7 @@ export default {
   },
 };
 
-async function handle(request, env) {
+async function handle(request, env, ctx) {
   {
     const origin = request.headers.get("Origin") || "";
     const path = new URL(request.url).pathname.replace(/\/+$/, "");
@@ -594,7 +626,7 @@ async function handle(request, env) {
     const me = await authed(request, env);
     if (!me) return reply(401, { error: "signed_out" });
 
-    if (path === "/me") return reply(200, { user: publicUser(me) });
+    if (path === "/me") return reply(200, { user: publicUser(me), galEnabled: !!env.GAL_WEBHOOK_URL });
     if (path === "/scan") return scan(env, me, body);
     if (path === "/readlink") return readLink(env, me, body);
     if (path === "/findphoto") return findPhoto(env, body);
@@ -603,9 +635,9 @@ async function handle(request, env) {
       await ensureTable(env);
       if (path === "/contacts/list") return listContacts(env, me);
       if (path === "/contacts/get") return getContact(env, me, body);
-      if (path === "/contacts/save") return saveContact(env, me, body);
-      if (path === "/contacts/delete") return deleteContact(env, me, body);
-      if (path === "/contacts/import") return importContacts(env, me, body);
+      if (path === "/contacts/save") return saveContact(env, me, body, ctx);
+      if (path === "/contacts/delete") return deleteContact(env, me, body, ctx);
+      if (path === "/contacts/import") return importContacts(env, me, body, ctx);
     }
 
     if (path.startsWith("/admin/")) {
@@ -625,8 +657,19 @@ async function handle(request, env) {
         if (!env.DB) return reply(500, { error: "no_database" });
         await ensureTable(env);
         const u = cleanUsername(body.username);
+        const { results: priv } = await env.DB.prepare("SELECT id FROM contacts WHERE created_by = ? AND shared = 0").bind(u).all();
         const r = await env.DB.prepare("UPDATE contacts SET shared = 1 WHERE created_by = ? AND shared = 0").bind(u).run();
+        await galUpsertIds(env, ctx, priv.map(x => x.id));
         return reply(200, { shared: (r.meta && r.meta.changes) || 0 });
+      }
+      if (path === "/admin/galsync") {
+        if (!env.DB) return reply(500, { error: "no_database" });
+        if (!env.GAL_WEBHOOK_URL) return reply(400, { error: "gal_not_set", message: "Outlook sync isn't set up yet. Add GAL_WEBHOOK_URL as a secret in Cloudflare." });
+        await ensureTable(env);
+        const { results } = await env.DB.prepare("SELECT id, data, created_by_name FROM contacts WHERE shared = 1 ORDER BY created_at").all();
+        const upsert = results.map(galPayload).filter(c => c.email);
+        for (let i = 0; i < upsert.length; i += 90) galSend(env, ctx, { upsert: upsert.slice(i, i + 90) });
+        return reply(200, { queued: upsert.length, skipped: results.length - upsert.length });
       }
     }
     return reply(404, { error: "not_found" });
