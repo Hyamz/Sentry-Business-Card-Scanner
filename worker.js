@@ -11,7 +11,9 @@
 //   D1 database binding   DB                 (create a D1 database, bind it as DB; the table is made automatically)
 //   MODEL                 Text, optional     defaults to claude-sonnet-5-5
 
-const ALLOWED_ORIGIN = "https://hyamz.github.io";
+// Sites allowed to use this server (the scanner's GitHub Pages addresses).
+const ALLOWED_ORIGINS = ["https://sentryadmin.github.io", "https://hyamz.github.io"];
+const ALLOWED_ORIGIN = ALLOWED_ORIGINS[0];
 const DEFAULT_MODEL = "claude-sonnet-5-5";
 const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 const SESSION_DAYS = 30;
@@ -600,11 +602,15 @@ async function importContacts(env, me, body, ctx) {
 
 export default {
   async fetch(request, env, ctx) {
-    try { return await handle(request, env, ctx); }
+    let res;
+    try { res = await handle(request, env, ctx); }
     catch (e) {
       console.log("Server error", e && e.stack || e);
-      return reply(500, { error: "server_error", message: "Server error: " + ((e && e.message) || "unknown") });
+      res = reply(500, { error: "server_error", message: "Server error: " + ((e && e.message) || "unknown") });
     }
+    const origin = request.headers.get("Origin") || "";
+    if (ALLOWED_ORIGINS.includes(origin)) res.headers.set("Access-Control-Allow-Origin", origin);
+    return res;
   },
 };
 
@@ -615,7 +621,7 @@ async function handle(request, env, ctx) {
 
     if (request.method === "OPTIONS") return new Response(null, { status: 204, headers: cors() });
     if (request.method !== "POST") return reply(405, { error: "method_not_allowed" });
-    if (origin !== ALLOWED_ORIGIN) return reply(403, { error: "forbidden_origin" });
+    if (!ALLOWED_ORIGINS.includes(origin)) return reply(403, { error: "forbidden_origin" });
     if (!env.USERS || !env.ANTHROPIC_API_KEY || !env.ADMIN_PASSWORD || !env.SESSION_SECRET) return reply(500, { error: "not_configured" });
 
     let body = {};
