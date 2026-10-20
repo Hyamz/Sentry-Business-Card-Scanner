@@ -9,18 +9,28 @@
   CustomAttribute1 = "SentryCardScanner" and CustomAttribute2 = <scanner id>, and
   it only ever changes or removes contacts carrying that tag. Mailboxes and
   contacts created by hand are never touched.
+
+  To test from your own PC first (signs in as you, no Azure needed):
+    Install-Module ExchangeOnlineManagement -Scope CurrentUser
+    .\Sync-SentryContactsToGAL.ps1 -UseMyLogin -TestJson '{"upsert":[{"id":"test0001","name":"Test Contact", ...}]}'
 #>
-param([object]$WebhookData)
+param(
+    [object]$WebhookData,
+    [string]$TestJson,      # run by hand with this JSON instead of a webhook
+    [switch]$UseMyLogin     # sign in interactively instead of the managed identity
+)
 
 $ErrorActionPreference = 'Stop'
 # Your tenant's onmicrosoft.com domain (Microsoft 365 admin centre > Settings > Domains).
 $Organization = 'CHANGE-ME.onmicrosoft.com'
 $Tag = 'SentryCardScanner'
 
-if (-not $WebhookData -or -not $WebhookData.RequestBody) { throw 'Start this runbook from its webhook.' }
-$body = $WebhookData.RequestBody | ConvertFrom-Json
+if ($TestJson) { $body = $TestJson | ConvertFrom-Json }
+elseif ($WebhookData -and $WebhookData.RequestBody) { $body = $WebhookData.RequestBody | ConvertFrom-Json }
+else { throw 'Start this runbook from its webhook, or run it by hand with -TestJson.' }
 
-Connect-ExchangeOnline -ManagedIdentity -Organization $Organization -ShowBanner:$false
+if ($UseMyLogin) { Connect-ExchangeOnline -ShowBanner:$false }
+else { Connect-ExchangeOnline -ManagedIdentity -Organization $Organization -ShowBanner:$false }
 
 function Clean([object]$value, [int]$max) {
     if ($null -eq $value) { return $null }
