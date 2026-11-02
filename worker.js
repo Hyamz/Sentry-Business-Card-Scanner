@@ -530,7 +530,8 @@ const rowOut = r => ({
 const COLS = "id, data, created_at, created_by, created_by_name, updated_at, updated_by, shared, avatar, (photo IS NOT NULL AND photo != '') AS has_photo";
 // Standalone users see only their own contacts. Everyone else sees the shared list plus any private ones of their own.
 async function listContacts(env, me) {
-  const { results } = me.standalone
+  // Standalone users see only their own; standalone admins also see the shared list (they switch views in the app).
+  const { results } = me.standalone && me.role !== "admin"
     ? await env.DB.prepare("SELECT " + COLS + " FROM contacts WHERE created_by = ? ORDER BY created_at DESC").bind(me.username).all()
     : await env.DB.prepare("SELECT " + COLS + " FROM contacts WHERE shared = 1 OR created_by = ? ORDER BY created_at DESC").bind(me.username).all();
   return reply(200, { contacts: results.map(rowOut) });
@@ -668,6 +669,13 @@ async function handle(request, env, ctx) {
       if (path === "/contacts/save") return saveContact(env, me, body, ctx);
       if (path === "/contacts/delete") return deleteContact(env, me, body, ctx);
       if (path === "/contacts/import") return importContacts(env, me, body, ctx);
+      if (path === "/contacts/share") {
+        if (me.role !== "admin") return reply(403, { error: "not_admin", message: "Only admins can share private contacts." });
+        if (!validId(body.id)) return reply(400, { error: "bad_request" });
+        await env.DB.prepare("UPDATE contacts SET shared = 1 WHERE id = ? AND shared = 0").bind(body.id).run();
+        await galUpsertIds(env, ctx, [body.id]);
+        return getContact(env, me, { id: body.id });
+      }
     }
 
     if (path.startsWith("/admin/")) {

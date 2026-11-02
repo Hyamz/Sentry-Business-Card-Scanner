@@ -512,14 +512,15 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     // switches
     const rowB = el("div","row");
     if (u.lockedUntil && u.lockedUntil > now) { const b = el("button","btn btn-quiet btn-sm","Unlock"); b.type = "button"; b.onclick = () => act({ unlock:true }, "Unlocked"); rowB.append(b); }
+    const solo = el("button","btn btn-quiet btn-sm", u.standalone ? "Turn off standalone" : "Make standalone"); solo.type = "button";
+    solo.onclick = () => act({ standalone: !u.standalone }, u.standalone ? "New contacts will go to the shared list"
+      : u.role === "admin" ? "Now standalone. New contacts stay private, and you can still switch to the shared list" : "Now standalone. New contacts stay private");
+    rowB.append(solo);
     if (!me) {
       const role = el("button","btn btn-quiet btn-sm", u.role === "admin" ? "Make scanner-only" : "Make admin"); role.type = "button";
       role.onclick = () => act({ role: u.role === "admin" ? "user" : "admin" }, u.role === "admin" ? "Admin access removed" : "Now an admin");
       const off = el("button","btn btn-quiet btn-sm", u.disabled ? "Switch on" : "Switch off"); off.type = "button";
       off.onclick = () => act({ disabled: !u.disabled }, u.disabled ? "Switched on" : "Switched off and signed out");
-      const solo = el("button","btn btn-quiet btn-sm", u.standalone ? "Turn off standalone" : "Make standalone"); solo.type = "button";
-      solo.onclick = () => act({ standalone: !u.standalone }, u.standalone ? "New contacts will go to the shared list" : "Now standalone. New contacts stay private");
-      rowB.append(solo);
       if (u.role !== "admin") {
         const ex = el("button","btn btn-quiet btn-sm", u.canExport ? "Disable CSV export" : "Enable CSV export"); ex.type = "button";
         ex.onclick = () => act({ canExport: !u.canExport }, u.canExport ? "CSV export disabled" : "CSV export enabled");
@@ -626,7 +627,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
   $("#q").addEventListener("input", render);
 
   // Offer to load a newer version when one is published (phones and GitHub keep old copies for a while).
-  const APP_VERSION = "202611021455";
+  const APP_VERSION = "202611021502";
   let updateShown = false;
   async function checkForUpdate(){
     if (updateShown) return;

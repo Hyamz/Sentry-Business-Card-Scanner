@@ -169,6 +169,8 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
 .seg button{border:0;background:transparent;border-radius:9px;padding:9px;font-weight:600;cursor:pointer;color:var(--muted)}
 .seg button[aria-pressed="true"]{background:var(--surface);color:var(--fg);box-shadow:0 1px 3px rgba(0,0,0,.12)}
 .scope-row{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:-6px}
+.scope-row{flex-wrap:wrap}
+.view-switch{flex:1 1 100%;max-width:420px}
 .who-filter{display:flex;align-items:center;gap:8px;flex:0 1 340px;min-width:0;font-size:13px;font-weight:600;color:var(--muted)}
 .who-filter select{flex:1;min-width:0;background:var(--surface);color:var(--fg);border:1.5px solid var(--line);border-radius:10px;padding:8px 10px;font-size:15px;font-weight:500}
 .who-sum{display:flex;flex-wrap:wrap;gap:4px 18px;align-items:baseline;background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:12px 14px;font-size:14px;color:var(--muted);font-variant-numeric:tabular-nums}
@@ -238,6 +240,10 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
   </div>
 
   <div class="scope-row">
+    <div class="seg view-switch" id="viewSw" role="group" aria-label="Which list" hidden>
+      <button type="button" id="vw-mine" aria-pressed="true">My private list</button>
+      <button type="button" id="vw-shared" aria-pressed="false">Shared list</button>
+    </div>
     <label class="who-filter" for="byUser"><span>Added by</span>
       <select id="byUser"><option value="all">Everyone</option></select>
     </label>
@@ -288,7 +294,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     ["website","Website",true],["address","Address",true]
   ];
   // Cloudflare Worker that holds the Anthropic API key and reads the cards.
-  const APP_VERSION = "202611021455";
+  const APP_VERSION = "202611021502";
   const WORKER_URL = "https://sentrycardscanner.robert-fb9.workers.dev";
   const NETWORKS = ["LinkedIn","X / Twitter","Instagram","Facebook","YouTube","TikTok","WhatsApp","Other"];
 
@@ -318,13 +324,30 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       t.onabort = () => rej(t.error);
     });
   }
-  const solo = () => !!(session && session.user.standalone);
+  // solo: private list only. dual: a standalone admin, who switches between their private list and the shared list.
+  const solo = () => !!(session && session.user.standalone && session.user.role !== "admin");
+  const dual = () => !!(session && session.user.standalone && session.user.role === "admin");
+  let view = "mine";
+  try { view = localStorage.getItem("sentry-scanner-view") === "shared" ? "shared" : "mine"; } catch {}
+  const setView = v => {
+    view = v; scope = "all";
+    try { localStorage.setItem("sentry-scanner-view", v); } catch {}
+    $("#vw-mine").setAttribute("aria-pressed", String(v === "mine")); $("#vw-shared").setAttribute("aria-pressed", String(v === "shared"));
+    render();
+  };
+  // The contacts the current view is drawn from.
+  const base = () => !dual() ? contacts : view === "mine"
+    ? contacts.filter(c => c.createdBy === session.user.username)
+    : contacts.filter(c => c.shared !== false);
   const canDel = c => !!(session && (session.user.role === "admin" || (c.createdBy === session.user.username && c.shared === false) || (session.user.canDelete && c.shared !== false)));
   function applyUser(u){
-    $("#who").textContent = "Signed in as " + (u.name || u.username) + (u.standalone ? " (private list)" : "");
+    const priv = u.standalone && u.role !== "admin", both = u.standalone && u.role === "admin";
+    $("#who").textContent = "Signed in as " + (u.name || u.username) + (priv ? " (private list)" : "");
     $("#adminLink").hidden = $("#adminDot").hidden = u.role !== "admin";
-    document.querySelector(".scope-row").hidden = !!u.standalone;
-    if (u.standalone) scope = "all";
+    document.querySelector(".scope-row").hidden = priv;
+    $("#viewSw").hidden = !both;
+    $("#vw-mine").setAttribute("aria-pressed", String(view === "mine")); $("#vw-shared").setAttribute("aria-pressed", String(view === "shared"));
+    if (priv) scope = "all";
   }
   const canEdit = c => !!(session && (session.user.role === "admin" || c.createdBy === session.user.username));
   async function saveContact(c){
@@ -471,24 +494,26 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
 
   let scope = "all";
   $("#byUser").onchange = e => { scope = e.target.value; render(); };
+  $("#vw-mine").onclick = () => setView("mine");
+  $("#vw-shared").onclick = () => setView("shared");
 
   // Fill the "Added by" list with everyone who has added contacts, with their counts.
   function buildUserFilter(){
     const sel = $("#byUser"), me = session && session.user.username;
     const counts = new Map();
-    for (const c of contacts) {
+    for (const c of base()) {
       const k = c.createdBy || "?";
       const e = counts.get(k) || { name: c.createdByName || k, n: 0 };
       e.n++; counts.set(k, e);
     }
     if (scope !== "all" && !counts.has(scope) && scope !== me) scope = "all";
-    const opts = [["all", "Everyone (" + contacts.length + ")"], [me, "Me (" + ((counts.get(me) || {}).n || 0) + ")"]];
+    const opts = [["all", "Everyone (" + base().length + ")"], [me, "Me (" + ((counts.get(me) || {}).n || 0) + ")"]];
     [...counts.entries()].filter(([k]) => k !== me).sort((a, b) => b[1].n - a[1].n || a[1].name.localeCompare(b[1].name))
       .forEach(([k, v]) => opts.push([k, v.name + " (" + v.n + ")"]));
     sel.replaceChildren(...opts.map(([v, t]) => { const o = document.createElement("option"); o.value = v; o.textContent = t; o.selected = v === scope; return o; }));
   }
   function userSummary(){
-    const mine = contacts.filter(c => c.createdBy === scope);
+    const mine = base().filter(c => c.createdBy === scope);
     const me = session && session.user.username;
     const name = scope === me ? "You" : ((mine[0] && mine[0].createdByName) || scope);
     const now = Date.now(), week = mine.filter(c => now - (c.createdAt || 0) < 7 * 864e5).length;
@@ -543,17 +568,21 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
   function render(){
     const res = $("#results");
     res.replaceChildren();
-    $("#count").textContent = contacts.length + (contacts.length === 1 ? " contact" : " contacts");
+    const nAll = session ? base().length : contacts.length;
+    $("#count").textContent = nAll + (nAll === 1 ? " contact" : " contacts");
     if (mode === "loading") {
       res.append(emptyBox(solo() ? "Loading your contacts…" : "Loading the shared list…", solo() ? "Cards you scan appear here, newest first." : "Every card the team scans appears here, newest first."));
       return;
     }
-    if (!solo()) buildUserFilter();
+    const byPerson = !solo() && !(dual() && view === "mine");
+    document.querySelector(".who-filter").hidden = !byPerson;
+    if (byPerson) buildUserFilter();
     const list = visible();
-    if (scope !== "all" && !solo()) res.append(userSummary());
+    if (scope !== "all" && byPerson) res.append(userSummary());
     $("#export").hidden = !list.length || !(session && session.user.canExport);
-    $("#exportLabel").textContent = list.length !== contacts.length ? "Export " + list.length + " to CSV" : "Export CSV";
+    $("#exportLabel").textContent = list.length !== base().length ? "Export " + list.length + " to CSV" : "Export CSV";
     if (mode === "error") { res.append(emptyBox("Shared list unavailable", "Tap Refresh to try again.")); return; }
+    if (dual() && !base().length) { res.append(emptyBox(view === "mine" ? "Your private list is empty" : "The shared list is empty", view === "mine" ? "Cards you scan are saved here, private to you." : "Switch to My private list to see your own contacts.")); return; }
     if (!contacts.length) { res.append(emptyBox("No contacts yet", solo() ? "Tap “Scan a card” to add your first business card. Your list is private to you." : "Tap “Scan a card” to add the first business card to the shared list.")); return; }
     if (!list.length && scope !== "all" && !query) { res.append(emptyBox(scope === session.user.username ? "You haven't added any yet" : "No contacts from this person", "Choose Everyone to see the whole team's list.")); return; }
     if (!list.length) { res.append(emptyBox("No matches", "Nothing matches “" + query + "”. Try a name, company, email or number.")); return; }
@@ -1034,7 +1063,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
       save.disabled = true;
       try {
         await saveContact(c);
-        closeSheet(); toast(opts.isNew ? (solo() ? "Saved to your contacts" : "Added to the shared list") : "Changes saved");
+        closeSheet(); toast(opts.isNew ? (solo() ? "Saved to your contacts" : dual() ? "Saved to your private list" : "Added to the shared list") : "Changes saved");
       } catch (e) {
         save.disabled = false;
         if (e && e.code === "signed_out") return;
@@ -1123,6 +1152,17 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
     const sh = el("button","btn btn-lime" + (canEdit(c) ? "" : " grow"),"Share"); sh.type="button";
     act.insertBefore(sh, canEdit(c) ? (act.children[1] || null) : act.firstChild);
     const del = el("button","btn btn-danger","Delete"); del.type="button";
+    if (c.shared === false && session.user.role === "admin") {
+      const shareBtn = el("button","btn btn-quiet","Share with everyone"); shareBtn.type = "button";
+      shareBtn.onclick = async () => {
+        shareBtn.disabled = true;
+        try {
+          const d = await api("/contacts/share", { id: c.id });
+          Object.assign(c, d.contact); render(); closeSheet(); toast("Shared with everyone");
+        } catch (e) { shareBtn.disabled = false; if (!e || e.code !== "signed_out") toast(serverMsg(e) || "Couldn't share it. Try again."); }
+      };
+      act.append(shareBtn);
+    }
     if (canDel(c)) act.append(del);
     s.append(act);
     const conf = el("div","confirm"); conf.hidden = true;
@@ -1251,7 +1291,7 @@ form.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-top:14px}
   function visible(){
     const terms = query.toLowerCase().split(/\s+/).filter(Boolean);
     const me = session && session.user.username;
-    return contacts
+    return base()
       .filter(c => scope === "all" || c.createdBy === scope)
       .filter(c => !terms.length || terms.every(t => haystack(c).includes(t)))
       .sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
