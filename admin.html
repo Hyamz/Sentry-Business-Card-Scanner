@@ -115,6 +115,8 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
 .login{max-width:400px;margin:40px auto 0;width:100%}
 .login .logo{height:44px;align-self:center}
 .login h2{text-align:center}
+.update-bar{position:fixed;left:50%;bottom:calc(16px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);z-index:35;display:flex;align-items:center;gap:12px;background:var(--teal);color:var(--teal-fg);border-radius:14px;padding:10px 12px 10px 16px;font-weight:600;max-width:calc(100% - 32px)}
+.update-bar button{border:0;border-radius:10px;padding:8px 12px;font-weight:700;background:var(--lime);color:#1b2a00;cursor:pointer}
 .toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:10px 16px;border-radius:12px;font-weight:600;z-index:40;max-width:calc(100% - 32px)}
 </style>
 </head>
@@ -622,6 +624,28 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
   }
 
   $("#q").addEventListener("input", render);
+
+  // Offer to load a newer version when one is published (phones and GitHub keep old copies for a while).
+  const APP_VERSION = "202611021455";
+  let updateShown = false;
+  async function checkForUpdate(){
+    if (updateShown) return;
+    try {
+      const r = await fetch("version.json?t=" + Date.now(), { cache: "no-store" });
+      const v = r.ok ? (await r.json()).version : null;
+      if (v && v !== APP_VERSION) {
+        updateShown = true;
+        const bar = el("div","update-bar"); bar.setAttribute("role","status");
+        const go = el("button", null, "Update"); go.type = "button";
+        go.onclick = () => { const u = new URL(location.href); u.searchParams.set("v", v); location.replace(u.href); };
+        bar.append(el("span", null, "A new version is ready"), go);
+        document.body.append(bar);
+      }
+    } catch {}
+  }
+  checkForUpdate();
+  setInterval(checkForUpdate, 5 * 60000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) checkForUpdate(); });
   $("#galBtn").onclick = async () => {
     const b = $("#galBtn"); b.disabled = true; b.textContent = "Sending…";
     try {
