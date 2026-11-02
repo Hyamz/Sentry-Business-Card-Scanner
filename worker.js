@@ -181,7 +181,10 @@ async function listUsers(env) {
   do {
     const page = await env.USERS.list({ prefix: "user:", cursor });
     const users = await Promise.all(page.keys.map(k => env.USERS.get(k.name, "json")));
-    users.filter(Boolean).forEach(u => out.push(publicUser(u)));
+    for (const u of users.filter(Boolean)) {
+      if (isProtected(u) && !u.protected) { u.protected = true; await putUser(env, u); }
+      out.push(publicUser(u));
+    }
     cursor = page.list_complete ? null : page.cursor;
   } while (cursor);
   out.sort((a, b) => (a.name || a.username).localeCompare(b.name || b.username));
@@ -236,8 +239,11 @@ async function checkMaster(env, body) {
 async function updateUser(env, me, body) {
   const user = await getUser(env, cleanUsername(body.username));
   if (!user) return reply(404, { error: "not_found", message: "That user no longer exists." });
+  if (isProtected(user)) user.protected = true;   // stays protected even after a rename
+  const newUsername = typeof body.newUsername === "string" ? cleanUsername(body.newUsername) : "";
+  const renaming = !!newUsername && newUsername !== user.username;
   if (isProtected(user) && user.username !== me.username) {
-    const risky = body.disabled === true || body.role === "user" || !!body.secret
+    const risky = body.disabled === true || body.role === "user" || !!body.secret || renaming
       || (typeof body.name === "string" && body.name.trim() !== (user.name || ""));
     if (risky) { const bad = await checkMaster(env, body); if (bad) return bad; }
   }
@@ -263,6 +269,24 @@ async function updateUser(env, me, body) {
   if (typeof body.canDelete === "boolean") user.canDelete = body.canDelete;
   if (typeof body.standalone === "boolean") user.standalone = body.standalone;
   if (typeof body.canExport === "boolean") user.canExport = body.canExport;
+  if (renaming) {
+    if (!validUsername(newUsername)) return reply(400, { error: "bad_username", message: "Usernames are 2 to 32 letters, numbers, dots, dashes or underscores." });
+    if (newUsername === "admin") return reply(400, { error: "reserved", message: "That username is reserved." });
+    if (await getUser(env, newUsername)) return reply(409, { error: "exists", message: "That username is already taken." });
+    const old = user.username;
+    user.username = newUsername;
+    user.tokenVersion = (user.tokenVersion || 0) + 1;   // old sign-ins stop working
+    await putUser(env, user);
+    await env.USERS.delete("user:" + old);
+    if (env.DB) {
+      await ensureTable(env);
+      await env.DB.prepare("UPDATE contacts SET created_by = ? WHERE created_by = ?").bind(newUsername, old).run();
+      await env.DB.prepare("UPDATE contacts SET updated_by = ? WHERE updated_by = ?").bind(newUsername, old).run();
+    }
+    const out = { user: publicUser(user), renamedFrom: old };
+    if (old === me.username) out.token = await makeToken(env, user);   // keep the person signed in
+    return reply(200, out);
+  }
   await putUser(env, user);
   return reply(200, { user: publicUser(user) });
 }

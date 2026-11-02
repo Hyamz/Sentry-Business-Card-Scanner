@@ -454,13 +454,34 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       Object.assign(u, d.user); toast(ok); render();
     });
 
-    // name
-    const nameRow = el("div","secret-row");
+    // full name (shown on contacts) and username (used to sign in)
+    const field = (label, input, btn) => { const f = el("div","f"); f.append(el("span","lab",label)); const r = el("div","secret-row"); r.append(input, btn); f.append(r); return f; };
+    const boxStyle = { background:"var(--bg)", border:"1.5px solid var(--line)", borderRadius:"10px", padding:"8px 12px", minWidth:"0" };
     const nameIn = el("input"); nameIn.value = u.name || ""; nameIn.placeholder = "Full name"; nameIn.setAttribute("aria-label","Full name");
-    Object.assign(nameIn.style,{ background:"var(--bg)", border:"1.5px solid var(--line)", borderRadius:"10px", padding:"8px 12px", minWidth:"0" });
-    const saveName = el("button","btn btn-quiet btn-sm","Save name"); saveName.type = "button";
-    saveName.onclick = () => act({ name: nameIn.value }, "Name updated");
-    nameRow.append(nameIn, saveName); p.append(nameRow);
+    Object.assign(nameIn.style, boxStyle);
+    const saveName = el("button","btn btn-quiet btn-sm","Save full name"); saveName.type = "button";
+    saveName.onclick = () => act({ name: nameIn.value }, "Full name updated");
+    p.append(field("Full name", nameIn, saveName));
+    const userIn = el("input"); userIn.value = u.username; userIn.autocapitalize = "none"; userIn.spellcheck = false; userIn.setAttribute("aria-label","Username");
+    Object.assign(userIn.style, boxStyle);
+    const saveUser = el("button","btn btn-quiet btn-sm","Save username"); saveUser.type = "button";
+    saveUser.onclick = () => {
+      const v = userIn.value.trim().toLowerCase();
+      if (!v || v === u.username) return say("err", "Type the new username first.");
+      if (!/^[a-z0-9._-]{2,32}$/.test(v)) return say("err", "Usernames are 2 to 32 letters, numbers, dots, dashes or underscores.");
+      run(extra => api("/admin/update", { username: u.username, newUsername: v, ...extra }), d => {
+        const old = u.username;
+        Object.assign(u, d.user);
+        if (contactCache.has(old)) { contactCache.set(u.username, contactCache.get(old)); contactCache.delete(old); }
+        if (openRow === old) openRow = u.username;
+        if (d.token && session.user.username === old) { session = { token: d.token, user: d.user }; try { localStorage.setItem(SKEY, JSON.stringify(session)); } catch {} }
+        toast("Username changed to " + u.username + ". They sign in with the new one from now on.");
+        render();
+      });
+    };
+    const uf = field("Username (used to sign in)", userIn, saveUser);
+    uf.append(el("span","hint","Changing it signs them out, so they sign in again with the new username. Their contacts stay with them."));
+    p.append(uf);
 
     // reset login
     const reset = el("div","f");
