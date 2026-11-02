@@ -93,6 +93,11 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
 .c-row+.c-row{border-top:1px solid var(--line)}
 .c-row summary{display:grid;grid-template-columns:36px 1fr auto;gap:10px;align-items:center;padding:10px 12px;cursor:pointer;list-style:none}
 .c-row summary::-webkit-details-marker{display:none}
+.c-row summary.has-tick{grid-template-columns:22px 36px 1fr auto}
+.c-tick{width:20px;height:20px;accent-color:var(--teal);margin:0;cursor:pointer}
+.share-bar{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:10px 12px;border-radius:12px;background:var(--lime-soft);color:var(--lime-ink)}
+.share-msg{font-weight:600;margin-right:auto}
+.share-conf{display:flex;flex-wrap:wrap;align-items:center;gap:6px;font-size:14px;flex-basis:100%}
 .c-av{width:36px;height:36px;border-radius:10px;font-size:13px;overflow:hidden}
 .c-av img{width:100%;height:100%;object-fit:cover;background:#fff}
 .c-main{min-width:0}
@@ -174,7 +179,7 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       <div class="panel" id="created" hidden></div>
 
       <div class="list" id="users"><div class="empty">Loading users…</div></div>
-      <p class="hint">Everyone can see and add to the shared contact list and edit what they added. Admins, and anyone you allow, can delete from it. Shared contacts with an email address are added to the Outlook Global Address List automatically; standalone users' private contacts never are. Standalone users keep a private list that only they see; use "Share their private contacts" to copy it into the shared list. Switching someone off or resetting their login signs them out everywhere straight away. The built-in <span class="mono">admin</span> login always works with the ADMIN_PASSWORD set in Cloudflare.</p>
+      <p class="hint">Everyone can see and add to the shared contact list and edit what they added. Admins, and anyone you allow, can delete from it. Shared contacts with an email address are added to the Outlook Global Address List automatically; standalone users' private contacts never are. Standalone users keep a private list that only they see; open their Contacts to tick the ones to share with everyone, or merge all of them into the shared list. Switching someone off or resetting their login signs them out everywhere straight away. The built-in <span class="mono">admin</span> login always works with the ADMIN_PASSWORD set in Cloudflare.</p>
     </div>
   </div>
 </div>
@@ -306,8 +311,60 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
     const exp = el("button","btn btn-quiet btn-sm","Export CSV"); exp.type = "button"; exp.hidden = true;
     head.append(q, exp);
     const box = el("div","c-list"); box.append(el("div","empty","Loading contacts…"));
-    p.append(head, box);
+    // Sharing private contacts: everything at once, or only the ticked ones.
+    const picked = new Set();
+    const shareBar = el("div","share-bar"); shareBar.hidden = true;
+    const shareMsg = el("span","share-msg");
+    const pickAll = el("button","btn btn-quiet btn-sm","Tick all private"); pickAll.type = "button";
+    const shareSel = el("button","btn btn-brand btn-sm","Share ticked with everyone"); shareSel.type = "button";
+    const shareAll = el("button","btn btn-quiet btn-sm","Merge all into the shared list"); shareAll.type = "button";
+    shareBar.append(shareMsg, pickAll, shareSel, shareAll);
+    p.append(head, shareBar, box);
+    const privateOf = list => list.filter(c => c.shared === false);
+    const refreshBar = list => {
+      const priv = privateOf(list);
+      for (const id of [...picked]) if (!priv.some(c => c.id === id)) picked.delete(id);
+      shareBar.hidden = !priv.length;
+      shareMsg.textContent = priv.length + " private contact" + (priv.length === 1 ? "" : "s") + (picked.size ? " · " + picked.size + " ticked" : "");
+      shareSel.disabled = !picked.size;
+      shareSel.textContent = picked.size ? "Share " + picked.size + " ticked with everyone" : "Share ticked with everyone";
+      pickAll.textContent = picked.size && picked.size === priv.length ? "Untick all" : "Tick all private";
+    };
+    const doShare = async ids => {
+      const btns = [shareSel, shareAll, pickAll]; btns.forEach(b => b.disabled = true);
+      try {
+        const d = await api("/admin/share", ids ? { username: u.username, ids } : { username: u.username });
+        const done = new Set(d.ids || ids || []);
+        const list = contactCache.get(u.username) || [];
+        for (const c of list) if (!d.ids && !ids ? c.shared === false : done.has(c.id)) c.shared = true;
+        picked.clear();
+        u.privateContacts = Math.max(0, (u.privateContacts || 0) - (d.shared || 0));
+        toast("Shared " + d.shared + " contact" + (d.shared === 1 ? "" : "s") + " with everyone");
+        render();
+      } catch (e) {
+        if (e.code !== "signed_out") toast(errText(e, "Couldn't share them. Try again."));
+        btns.forEach(b => b.disabled = false); refreshBar(contactCache.get(u.username) || []);
+      }
+    };
+    shareSel.onclick = () => { if (picked.size) doShare([...picked]); };
+    shareAll.onclick = () => {
+      const n = privateOf(contactCache.get(u.username) || []).length;
+      shareAll.hidden = true;
+      const conf = el("span","share-conf");
+      const yes = el("button","btn btn-brand btn-sm","Share all " + n); yes.type = "button";
+      const no = el("button","btn btn-quiet btn-sm","Cancel"); no.type = "button";
+      no.onclick = () => { conf.remove(); shareAll.hidden = false; };
+      yes.onclick = () => { conf.remove(); shareAll.hidden = false; doShare(null); };
+      conf.append(document.createTextNode("Everyone will see them. "), yes, no);
+      shareBar.append(conf);
+    };
+    pickAll.onclick = () => {
+      const priv = privateOf(contactCache.get(u.username) || []);
+      if (picked.size === priv.length) picked.clear(); else priv.forEach(c => picked.add(c.id));
+      draw(contactCache.get(u.username) || []);
+    };
     const draw = list => {
+      refreshBar(list);
       const t = q.value.trim().toLowerCase();
       const shown = list.filter(c => !t || [c.name,c.title,c.company,c.email,c.phone,c.mobile,c.notes].join(" ").toLowerCase().includes(t));
       box.replaceChildren();
@@ -316,6 +373,14 @@ h1{font-family:var(--f-display);font-size:22px;margin:0}
       for (const c of shown) {
         const row = el("details","c-row");
         const sum = el("summary");
+        if (c.shared === false) {
+          const tick = document.createElement("input"); tick.type = "checkbox"; tick.className = "c-tick";
+          tick.checked = picked.has(c.id); tick.setAttribute("aria-label", "Share " + (c.name || c.company || "this contact"));
+          tick.addEventListener("click", ev => ev.stopPropagation());
+          tick.addEventListener("change", () => { if (tick.checked) picked.add(c.id); else picked.delete(c.id); refreshBar(list); });
+          sum.append(tick);
+          sum.classList.add("has-tick");
+        }
         const av = el("div","avatar c-av");
         if (c.avatar) { const i = new Image(); i.src = c.avatar; i.alt = ""; av.append(i); } else av.textContent = ((c.name || c.company || "?").trim().split(/\s+/).slice(0,2).map(w => w[0]).join("") || "?").toUpperCase();
         const m = el("div","c-main");

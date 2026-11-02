@@ -663,10 +663,20 @@ async function handle(request, env, ctx) {
         if (!env.DB) return reply(500, { error: "no_database" });
         await ensureTable(env);
         const u = cleanUsername(body.username);
-        const { results: priv } = await env.DB.prepare("SELECT id FROM contacts WHERE created_by = ? AND shared = 0").bind(u).all();
-        const r = await env.DB.prepare("UPDATE contacts SET shared = 1 WHERE created_by = ? AND shared = 0").bind(u).run();
-        await galUpsertIds(env, ctx, priv.map(x => x.id));
-        return reply(200, { shared: (r.meta && r.meta.changes) || 0 });
+        // Share all of a user's private contacts, or only the ones listed in ids.
+        const only = Array.isArray(body.ids) ? body.ids.filter(validId).slice(0, 500) : null;
+        if (only && !only.length) return reply(400, { error: "bad_request", message: "Tick at least one contact to share." });
+        let { results: priv } = await env.DB.prepare("SELECT id FROM contacts WHERE created_by = ? AND shared = 0").bind(u).all();
+        if (only) { const want = new Set(only); priv = priv.filter(x => want.has(x.id)); }
+        const ids = priv.map(x => x.id);
+        let shared = 0;
+        for (let i = 0; i < ids.length; i += 90) {
+          const chunk = ids.slice(i, i + 90);
+          const r = await env.DB.prepare("UPDATE contacts SET shared = 1 WHERE created_by = ? AND shared = 0 AND id IN (" + chunk.map(() => "?").join(",") + ")").bind(u, ...chunk).run();
+          shared += (r.meta && r.meta.changes) || 0;
+        }
+        await galUpsertIds(env, ctx, ids);
+        return reply(200, { shared, ids });
       }
       if (path === "/admin/galsync") {
         if (!env.DB) return reply(500, { error: "no_database" });
